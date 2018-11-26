@@ -84,14 +84,14 @@ object LinkPrediction {
       .option("inferSchema", "true")
       .csv(groundTruthNetworkFile)
       .toDF("gtsId", "gttId")
-      .withColumn("label", lit(1.0)).cache()
+      .withColumn("label", lit(1.0))
 
     val nodeInfoDF = transformNodeInfo(ss.read
       .option("header", "false")
       .option("sep", ",")
       .option("inferSchema", "true")
       .csv(nodeInfoFile)
-      .toDF("id", "year", "title", "authors", "journal", "abstract"))
+      .toDF("id", "year", "title", "authors", "journal", "abstract")).cache()
 
     val trainingSetDF = transformSet(
       ss.read
