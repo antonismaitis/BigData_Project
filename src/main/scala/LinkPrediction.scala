@@ -10,6 +10,7 @@ import java.io.BufferedWriter
 import java.io.FileWriter
 import scala.collection.JavaConverters._
 import scala.collection.JavaConverters._
+import org.apache.spark.sql.functions.col
 
 class AsArrayList[T](input: List[T]) {
   def asArrayList: java.util.ArrayList[T] = new java.util.ArrayList[T](input.asJava)
@@ -105,7 +106,8 @@ object LinkPrediction {
         .drop("labelTmp","_c0"),
       nodeInfoDF
     )
-
+//    val cond = trainingSetDF.columns.map(x => col(x).isNull || col(x) === "").reduce(_ || _)
+//    df.filter(cond).show
     trainingSetDF.show(10)
 
     val testingSetDF = transformSet(
