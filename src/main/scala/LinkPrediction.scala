@@ -4,7 +4,7 @@ import org.apache.spark.sql.types._
 import org.apache.spark.ml.linalg
 import org.apache.spark.ml.linalg.Vectors
 import org.apache.spark.ml.feature.VectorAssembler
-import org.apache.spark.ml.classification.{LogisticRegression, LogisticRegressionModel, NaiveBayes, RandomForestClassifier}
+import org.apache.spark.ml.classification.{LogisticRegression, LogisticRegressionModel, NaiveBayes, DecisionTreeClassifier, RandomForestClassifier}
 import org.apache.spark.ml.feature.{HashingTF, IDF, Tokenizer}
 import org.apache.spark.sql.functions._
 import org.apache.spark._
@@ -32,6 +32,14 @@ object LinkPrediction {
     def toDoubleUDF = udf(
       (n: Int) => n.toDouble
     )
+
+    def myUDF: UserDefinedFunction = udf(
+      (s1: String, s2: String) => {
+        val splitted1 = s1.split(",")
+        val splitted2 = s2.split(",")
+        splitted1.intersect(splitted2).length
+      })
+
 
     def dotProductUDF = udf(
       (a: linalg.Vector, b: linalg.Vector) => {
@@ -78,7 +86,7 @@ object LinkPrediction {
     def transformSet(input: DataFrame, nodeInfo: DataFrame, graph: DataFrame): DataFrame = {
       val assembler = new VectorAssembler()
         //        .setInputCols(Array("yearDiff", "isSameJournal","cosSimTFIDF"))
-        .setInputCols(Array("yearDiff", "isSameJournal", "cosSimTFIDF", "tInDegrees", "inDegreesDiff", "commonNeighbors", "jaccardCoefficient"))
+        .setInputCols(Array("yearDiff","nCommonAuthors","isSelfCitation", "isSameJournal", "cosSimTFIDF", "tInDegrees", "inDegreesDiff", "commonNeighbors", "jaccardCoefficient"))
         .setOutputCol("features")
 
       val tempDF = input
@@ -95,6 +103,8 @@ object LinkPrediction {
             $"abstractFeatures".as("tAbstractFeatures")), $"tId" === $"id")
         .drop("id")
         .withColumn("yearDiff", $"tYear" - $"sYear")
+        .withColumn("nCommonAuthors", when($"sAuthors".isNotNull && $"tAuthors".isNotNull, myUDF('sAuthors,'tAuthors)).otherwise(0))
+        .withColumn("isSelfCitation", $"nCommonAuthors" >=1 )
         .withColumn("isSameJournal", when($"sJournal" === $"tJournal", true).otherwise(false))
         .withColumn("cosSimTFIDF", dotProductUDF($"sAbstractFeatures", $"tAbstractFeatures"))
         .drop("sAbstractFeatures").drop("tAbstractFeatures")
@@ -196,6 +206,22 @@ object LinkPrediction {
     println("F1-score of Random Forest: " + accuracyRF)
 
     println("Importance of features: " + RFModel.featureImportances)
+
+    val DTModel = new DecisionTreeClassifier()
+      .setMaxDepth(30)
+      .setImpurity("entropy")
+      .fit(transformedTrainingSetDF)
+
+    val predictionsDT = DTModel.transform(transformedTestingSetDF)
+    predictionsDT.printSchema()
+    predictionsDT.show(10)
+
+    val accuracyDT = evaluator.evaluate(predictionsDT)
+    println("F1-score of Decision Tree : "+accuracyDT)
+
+
+
+
 
 //    System.in.read()
     ss.stop()
