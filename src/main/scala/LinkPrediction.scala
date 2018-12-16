@@ -14,14 +14,13 @@ import au.com.bytecode.opencsv.CSVWriter
 import java.io.BufferedWriter
 import java.io.FileWriter
 import scala.collection.JavaConverters._
-import org.apache.spark.
 import org.apache.spark._
 import org.apache.spark.graphx._
 import scala.collection.mutable
 import org.apache.spark.rdd.RDD
 import org.apache.spark.ml.clustering.{BisectingKMeans, KMeans}
-
-
+import org.apache.spark.sql.{Dataset, Encoder, Encoders}
+import org.apache.spark.sql.expressions.UserDefinedFunction
 //Comment out after first compile
 case class MyCase(sId: Int, tId:Int, label:Double, sAuthors:String, sYear:Int, sJournal:String,tAuthors:String, tYear:Int,tJournal:String, yearDiff:Int,nCommonAuthors:Int,isSelfCitation:Boolean
                   ,isSameJournal:Boolean,cosSimTFIDF:Double,sInDegrees:Int,sNeighbors:Array[Long],tInDegrees:Int,tNeighbors:Array[Long],inDegreesDiff:Int,commonNeighbors:Int,jaccardCoefficient:Double)
@@ -112,18 +111,20 @@ object LinkPrediction {
     def transformSet(input: DataFrame, nodeInfo: DataFrame, graph: DataFrame): DataFrame = {
       val assembler = new VectorAssembler()
         //        .setInputCols(Array("yearDiff", "isSameJournal","cosSimTFIDF"))
-        .setInputCols(Array("yearDiff","nCommonAuthors","isSelfCitation", "isSameJournal", "cosSimTFIDF", "tInDegrees", "inDegreesDiff", "commonNeighbors", "jaccardCoefficient"))
+        .setInputCols(Array("yearDiff","nCommonAuthors","isSelfCitation","isSameJournal", "cosSimTFIDF", "tInDegrees", "inDegreesDiff", "commonNeighbors", "jaccardCoefficient"))
         .setOutputCol("features")
 
       val tempDF = input
         .join(nodeInfo
           .select($"id",
+            $"authors".as("sAuthors"),
             $"year".as("sYear"),
             $"journal".as("sJournal"),
             $"abstractFeatures".as("sAbstractFeatures")), $"sId" === $"id")
         .drop("id")
         .join(nodeInfo
           .select($"id",
+            $"authors".as("tAuthors"),
             $"year".as("tYear"),
             $"journal".as("tJournal"),
             $"abstractFeatures".as("tAbstractFeatures")), $"tId" === $"id")
@@ -149,27 +150,9 @@ object LinkPrediction {
         .withColumn("inDegreesDiff", $"tInDegrees" - $"sInDegrees")
         .withColumn("commonNeighbors", when($"sNeighbors".isNotNull && $"tNeighbors".isNotNull, commonNeighbors($"sNeighbors", $"tNeighbors")).otherwise(0))
         .withColumn("jaccardCoefficient", when($"sNeighbors".isNotNull && $"tNeighbors".isNotNull, jaccardCoefficient($"sNeighbors", $"tNeighbors")).otherwise(0))
-        .withColumn("yearDiff", abs($"sYear" - $"tYear"))
         .filter($"sYear" > $"tYear")
 
       assembler.transform(tempDF)
-    }
-
-    def transformSettest(input: DataFrame, nodeInfo: DataFrame): DataFrame = {
-      val assembler = new VectorAssembler()
-        .setInputCols(Array("yearDiff"))
-        .setOutputCol("features")
-
-      val tempDFtest = input
-        .join(nodeInfo.select("id", "year"), $"sId" === $"id")
-        .withColumnRenamed("year", "sYear")
-        .drop("id")
-        .join(nodeInfo.select("id", "year"), $"tId" === $"id")
-        .withColumnRenamed("year", "tYear")
-        .drop("id")
-        .withColumn("yearDiff", abs($"sYear" - $"tYear"))
-
-      assembler.transform(tempDFtest)
     }
 
     // Read the contents of files in dataframes
@@ -209,31 +192,26 @@ object LinkPrediction {
 
     val colNames = Seq("sId", "tId", "labelTmp")
 
-    val trainingSetDF = transformSet(
-      trainingSet
-        .toDF(colNames: _*)
-        .withColumn("label", toDoubleUDF($"labelTmp"))
-        .drop("labelTmp", "_c0"),
-      nodeInfoDF
-    )
+    val trainingSetDF = ss.read
+      .option("header", "false")
+      .option("sep", " ")
+      .option("inferSchema", "true")
+      .csv(trainingSetFile)
+      .toDF("sId", "tId", "labelTmp")
+      .withColumn("label", toDoubleUDF($"labelTmp"))
+      .drop("labelTmp")
 
     trainingSetDF.show(10)
 
-    val testingSetDF = transformSettest(
-      ss.read
-        .option("header", "false")
-        .option("sep", " ")
-        .option("inferSchema", "true")
-        .csv(testingSetFile)
-        .toDF("sId", "tId")
-        .join(groundTruthNetworkDF, $"sId" === $"gtsId" && $"tId" === $"gttId", "left")
-        .drop("gtsId").drop("gttId")
-        .withColumn("label", when($"label" === 1.0, $"label").otherwise(0.0))
-        .withColumn("randomPrediction", when(randn(0) > 0.5, 1.0).otherwise(0.0)),
-      nodeInfoDF
-
-
-
+    val testingSetDF = ss.read
+      .option("header", "false")
+      .option("sep", " ")
+      .option("inferSchema", "true")
+      .csv(testingSetFile)
+      .toDF("sId", "tId")
+      .join(groundTruthNetworkDF, $"sId" === $"gtsId" && $"tId" === $"gttId", "left")
+      .drop("gtsId").drop("gttId")
+      .withColumn("label", when($"label" === 1.0, $"label").otherwise(0.0))
 
     val graphDF = transformGraph(
       Graph.fromEdgeTuples(
@@ -243,11 +221,12 @@ object LinkPrediction {
           .rdd.map(r => (r.getInt(0), r.getInt(1))), 1
       )
     )
-    testingSetDF.show(10)
+
 
     val transformedTrainingSetDF = transformSet(trainingSetDF, nodeInfoDF, graphDF)
       .cache()
-
+    val transformedTestingSetDF = transformSet(testingSetDF, nodeInfoDF, graphDF)
+    transformedTestingSetDF.show(10)
 
     val evaluator = new MulticlassClassificationEvaluator()
       .setLabelCol("label")
