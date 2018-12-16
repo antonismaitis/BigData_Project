@@ -1,4 +1,3 @@
-import org.apache.spark.ml.classification.{LogisticRegression, NaiveBayes}
 import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.types._
@@ -35,12 +34,10 @@ class AsArrayList[T](input: List[T]) {
   def asArrayList: java.util.ArrayList[T] = new java.util.ArrayList[T](input.asJava)
 }
 
-
 object LinkPrediction {
   def main(args: Array[String]): Unit = {
 
     // Create the spark session first
-
     val ss = SparkSession.builder().master("local").appName("linkPrediction").getOrCreate()
     import ss.implicits._ // For implicit conversions like converting RDDs to DataFrames
 
@@ -152,8 +149,27 @@ object LinkPrediction {
         .withColumn("inDegreesDiff", $"tInDegrees" - $"sInDegrees")
         .withColumn("commonNeighbors", when($"sNeighbors".isNotNull && $"tNeighbors".isNotNull, commonNeighbors($"sNeighbors", $"tNeighbors")).otherwise(0))
         .withColumn("jaccardCoefficient", when($"sNeighbors".isNotNull && $"tNeighbors".isNotNull, jaccardCoefficient($"sNeighbors", $"tNeighbors")).otherwise(0))
+        .withColumn("yearDiff", abs($"sYear" - $"tYear"))
+        .filter($"sYear" > $"tYear")
 
       assembler.transform(tempDF)
+    }
+
+    def transformSettest(input: DataFrame, nodeInfo: DataFrame): DataFrame = {
+      val assembler = new VectorAssembler()
+        .setInputCols(Array("yearDiff"))
+        .setOutputCol("features")
+
+      val tempDFtest = input
+        .join(nodeInfo.select("id", "year"), $"sId" === $"id")
+        .withColumnRenamed("year", "sYear")
+        .drop("id")
+        .join(nodeInfo.select("id", "year"), $"tId" === $"id")
+        .withColumnRenamed("year", "tYear")
+        .drop("id")
+        .withColumn("yearDiff", abs($"sYear" - $"tYear"))
+
+      assembler.transform(tempDFtest)
     }
 
     // Read the contents of files in dataframes
@@ -197,21 +213,13 @@ object LinkPrediction {
       trainingSet
         .toDF(colNames: _*)
         .withColumn("label", toDoubleUDF($"labelTmp"))
-        .drop("labelTmp","_c0"),
+        .drop("labelTmp", "_c0"),
       nodeInfoDF
     )
-    val trainingSetDF = ss.read
-      .option("header", "false")
-      .option("sep", " ")
-      .option("inferSchema", "true")
-      .csv(trainingSetFile)
-      .toDF("sId", "tId", "labelTmp")
-      .withColumn("label", toDoubleUDF($"labelTmp"))
-      .drop("labelTmp")
 
     trainingSetDF.show(10)
 
-    val testingSetDF = transformSet(
+    val testingSetDF = transformSettest(
       ss.read
         .option("header", "false")
         .option("sep", " ")
