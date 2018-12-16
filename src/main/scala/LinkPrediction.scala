@@ -1,3 +1,4 @@
+import org.apache.spark.ml.classification.{LogisticRegression, NaiveBayes}
 import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import org.apache.spark.sql.types._
@@ -7,15 +8,39 @@ import org.apache.spark.ml.feature.VectorAssembler
 import org.apache.spark.ml.classification.{LogisticRegression, LogisticRegressionModel, NaiveBayes, DecisionTreeClassifier, RandomForestClassifier}
 import org.apache.spark.ml.feature.{HashingTF, IDF, Tokenizer}
 import org.apache.spark.sql.functions._
+import org.apache.spark.sql.{DataFrame, SparkSession}
+import scala.io.Source // from the Scala standard library
+import java.io.{PrintWriter, File, FileOutputStream}
+import au.com.bytecode.opencsv.CSVWriter
+import java.io.BufferedWriter
+import java.io.FileWriter
+import scala.collection.JavaConverters._
+import org.apache.spark.
 import org.apache.spark._
 import org.apache.spark.graphx._
 import scala.collection.mutable
 import org.apache.spark.rdd.RDD
+import org.apache.spark.ml.clustering.{BisectingKMeans, KMeans}
+
+
+//Comment out after first compile
+case class MyCase(sId: Int, tId:Int, label:Double, sAuthors:String, sYear:Int, sJournal:String,tAuthors:String, tYear:Int,tJournal:String, yearDiff:Int,nCommonAuthors:Int,isSelfCitation:Boolean
+                  ,isSameJournal:Boolean,cosSimTFIDF:Double,sInDegrees:Int,sNeighbors:Array[Long],tInDegrees:Int,tNeighbors:Array[Long],inDegreesDiff:Int,commonNeighbors:Int,jaccardCoefficient:Double)
+
+
+
+
+
+class AsArrayList[T](input: List[T]) {
+  def asArrayList: java.util.ArrayList[T] = new java.util.ArrayList[T](input.asJava)
+}
+
 
 object LinkPrediction {
   def main(args: Array[String]): Unit = {
 
     // Create the spark session first
+
     val ss = SparkSession.builder().master("local").appName("linkPrediction").getOrCreate()
     import ss.implicits._ // For implicit conversions like converting RDDs to DataFrames
 
@@ -24,10 +49,14 @@ object LinkPrediction {
 
     val currentDir = System.getProperty("user.dir") // get the current directory
     val trainingSetFile = "./training_set.txt"
+    val trainingSetFixedFilePath = "./training_set_fixed.csv"
     val testingSetFile = "./testing_set.txt"
     val nodeInfoFile = "./node_information.csv"
     val groundTruthNetworkFile = "./Cit-HepTh.txt"
+    val trainingSetFixedFile = new BufferedWriter(new FileWriter("./training_set_fixed.csv"))
+    val writer = new CSVWriter(trainingSetFixedFile)
 
+    implicit def asArrayList[T](input: List[T]) = new AsArrayList[T](input)
 
     def toDoubleUDF = udf(
       (n: Int) => n.toDouble
@@ -143,6 +172,34 @@ object LinkPrediction {
       .csv(nodeInfoFile)
       .toDF("id", "year", "title", "authors", "journal", "abstract")).cache()
 
+    //read txt and convert it to array
+    def readtxtToArray(): java.util.List[Array[String]] = {
+      ((Source.fromFile(trainingSetFile)
+        .getLines()
+        .map(_.split(" ").map(_.trim.toString))).toList).asArrayList
+    }
+
+
+    //fix the values of years looking future years
+
+
+    //convert it to csv
+
+    writer.writeAll(readtxtToArray())
+    trainingSetFixedFile.close()
+
+    val trainingSet = ss.read
+      .csv(trainingSetFixedFilePath)
+
+    val colNames = Seq("sId", "tId", "labelTmp")
+
+    val trainingSetDF = transformSet(
+      trainingSet
+        .toDF(colNames: _*)
+        .withColumn("label", toDoubleUDF($"labelTmp"))
+        .drop("labelTmp","_c0"),
+      nodeInfoDF
+    )
     val trainingSetDF = ss.read
       .option("header", "false")
       .option("sep", " ")
@@ -152,15 +209,23 @@ object LinkPrediction {
       .withColumn("label", toDoubleUDF($"labelTmp"))
       .drop("labelTmp")
 
-    val testingSetDF = ss.read
-      .option("header", "false")
-      .option("sep", " ")
-      .option("inferSchema", "true")
-      .csv(testingSetFile)
-      .toDF("sId", "tId")
-      .join(groundTruthNetworkDF, $"sId" === $"gtsId" && $"tId" === $"gttId", "left")
-      .drop("gtsId").drop("gttId")
-      .withColumn("label", when($"label" === 1.0, $"label").otherwise(0.0))
+    trainingSetDF.show(10)
+
+    val testingSetDF = transformSet(
+      ss.read
+        .option("header", "false")
+        .option("sep", " ")
+        .option("inferSchema", "true")
+        .csv(testingSetFile)
+        .toDF("sId", "tId")
+        .join(groundTruthNetworkDF, $"sId" === $"gtsId" && $"tId" === $"gttId", "left")
+        .drop("gtsId").drop("gttId")
+        .withColumn("label", when($"label" === 1.0, $"label").otherwise(0.0))
+        .withColumn("randomPrediction", when(randn(0) > 0.5, 1.0).otherwise(0.0)),
+      nodeInfoDF
+
+
+
 
     val graphDF = transformGraph(
       Graph.fromEdgeTuples(
@@ -170,12 +235,11 @@ object LinkPrediction {
           .rdd.map(r => (r.getInt(0), r.getInt(1))), 1
       )
     )
+    testingSetDF.show(10)
 
     val transformedTrainingSetDF = transformSet(trainingSetDF, nodeInfoDF, graphDF)
       .cache()
 
-    val transformedTestingSetDF = transformSet(testingSetDF, nodeInfoDF, graphDF)
-      .cache()
 
     val evaluator = new MulticlassClassificationEvaluator()
       .setLabelCol("label")
@@ -219,7 +283,35 @@ object LinkPrediction {
     val accuracyDT = evaluator.evaluate(predictionsDT)
     println("F1-score of Decision Tree : "+accuracyDT)
 
+    val numOfClusters = 2
 
+
+    val men = Encoders.product[MyCase]
+
+    val ds: Dataset[MyCase] = transformedTrainingSetDF.as(men)
+
+
+    //KMEANS
+    val kmeans = new KMeans().setK(numOfClusters).setSeed(1L)
+    val model = kmeans.fit(ds)
+    // Evaluate clustering by computing Within Set Sum of Squared Errors.
+    val WSSSE = model.computeCost(ds)
+    println(s"Within Set Sum of Squared Errors = $WSSSE")
+    // Shows the result.
+    println("Cluster Centers: ")
+    model.clusterCenters.foreach(println)
+
+
+    //BisectingKMEANS
+    val bkm = new BisectingKMeans().setK(numOfClusters).setSeed(1L)
+    val modelB = bkm.fit(ds)
+    // Evaluate clustering.
+    val cost = modelB.computeCost(ds)
+    println(s"Within Set Sum of Squared Errors = $cost")
+    // Shows the result.
+    println("Cluster Centers: ")
+    val centers = modelB.clusterCenters
+    centers.foreach(println)
 
 
 
