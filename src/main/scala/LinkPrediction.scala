@@ -45,12 +45,12 @@ object LinkPrediction {
 
     val currentDir = System.getProperty("user.dir") // get the current directory
     val trainingSetFile = "./training_set.txt"
-    val trainingSetFixedFilePath = "./training_set_fixed.csv"
+//    val trainingSetFixedFilePath = "./training_set_fixed.csv"
     val testingSetFile = "./testing_set.txt"
     val nodeInfoFile = "./node_information.csv"
     val groundTruthNetworkFile = "./Cit-HepTh.txt"
-    val trainingSetFixedFile = new BufferedWriter(new FileWriter("./training_set_fixed.csv"))
-    val writer = new CSVWriter(trainingSetFixedFile)
+//    val trainingSetFixedFile = new BufferedWriter(new FileWriter("./training_set_fixed.csv"))
+//    val writer = new CSVWriter(trainingSetFixedFile)
 
     implicit def asArrayList[T](input: List[T]) = new AsArrayList[T](input)
 
@@ -171,12 +171,12 @@ object LinkPrediction {
       .csv(nodeInfoFile)
       .toDF("id", "year", "title", "authors", "journal", "abstract")).cache()
 
-    //read txt and convert it to array
-    def readtxtToArray(): java.util.List[Array[String]] = {
-      ((Source.fromFile(trainingSetFile)
-        .getLines()
-        .map(_.split(" ").map(_.trim.toString))).toList).asArrayList
-    }
+//    //read txt and convert it to array
+//    def readtxtToArray(): java.util.List[Array[String]] = {
+//      ((Source.fromFile(trainingSetFile)
+//        .getLines()
+//        .map(_.split(" ").map(_.trim.toString))).toList).asArrayList
+//    }
 
 
     //fix the values of years looking future years
@@ -184,11 +184,11 @@ object LinkPrediction {
 
     //convert it to csv
 
-    writer.writeAll(readtxtToArray())
-    trainingSetFixedFile.close()
+//    writer.writeAll(readtxtToArray())
+//    trainingSetFixedFile.close()
 
-    val trainingSet = ss.read
-      .csv(trainingSetFixedFilePath)
+//    val trainingSet = ss.read
+//      .csv(trainingSetFixedFilePath)
 
     val colNames = Seq("sId", "tId", "labelTmp")
 
