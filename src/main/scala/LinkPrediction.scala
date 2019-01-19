@@ -1,41 +1,24 @@
-import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
-import org.apache.spark.sql.{DataFrame, SparkSession}
-import org.apache.spark.sql.types._
-import org.apache.spark.ml.linalg
-import org.apache.spark.ml.linalg.Vectors
-import org.apache.spark.ml.feature.VectorAssembler
-import org.apache.spark.ml.classification.{LogisticRegression, LogisticRegressionModel, NaiveBayes, DecisionTreeClassifier, RandomForestClassifier}
-import org.apache.spark.ml.feature.{HashingTF, IDF, Tokenizer}
-import org.apache.spark.sql.functions._
-import org.apache.spark.sql.{DataFrame, SparkSession}
-import scala.io.Source // from the Scala standard library
-import java.io.{PrintWriter, File, FileOutputStream}
-import au.com.bytecode.opencsv.CSVWriter
-import java.io.BufferedWriter
-import java.io.FileWriter
-import scala.collection.JavaConverters._
-import org.apache.spark._
 import org.apache.spark.graphx._
-import scala.collection.mutable
-import org.apache.spark.rdd.RDD
+import org.apache.spark.ml.classification.{DecisionTreeClassifier, LogisticRegression, RandomForestClassifier}
 import org.apache.spark.ml.clustering.{BisectingKMeans, KMeans}
-import org.apache.spark.sql.{Dataset, Encoder, Encoders}
+import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
+import org.apache.spark.ml.feature.{HashingTF, IDF, Tokenizer, VectorAssembler}
+import org.apache.spark.ml.linalg
 import org.apache.spark.sql.expressions.UserDefinedFunction
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.{DataFrame, Dataset, Encoders, SparkSession}
+
+import scala.collection.mutable
+//import org.apache.spark.ml.feature.MinHashLSH
+
 //Comment out after first compile
 case class MyCase(sId: Int, tId:Int, label:Double, sAuthors:String, sYear:Int, sJournal:String,tAuthors:String, tYear:Int,tJournal:String, yearDiff:Int,nCommonAuthors:Int,isSelfCitation:Boolean
                   ,isSameJournal:Boolean,cosSimTFIDF:Double,sInDegrees:Int,sNeighbors:Array[Long],tInDegrees:Int,tNeighbors:Array[Long],inDegreesDiff:Int,commonNeighbors:Int,jaccardCoefficient:Double)
 
 
-
-
-
-class AsArrayList[T](input: List[T]) {
-  def asArrayList: java.util.ArrayList[T] = new java.util.ArrayList[T](input.asJava)
-}
-
 object LinkPrediction {
   def main(args: Array[String]): Unit = {
-
+    System.setProperty("hadoop.home.dir", "C:\\Program Files\\JetBrains\\IntelliJ IDEA 2018.3\\")
     // Create the spark session first
     val ss = SparkSession.builder().master("local").appName("linkPrediction").getOrCreate()
     import ss.implicits._ // For implicit conversions like converting RDDs to DataFrames
@@ -45,14 +28,10 @@ object LinkPrediction {
 
     val currentDir = System.getProperty("user.dir") // get the current directory
     val trainingSetFile = "./training_set.txt"
-//    val trainingSetFixedFilePath = "./training_set_fixed.csv"
     val testingSetFile = "./testing_set.txt"
     val nodeInfoFile = "./node_information.csv"
     val groundTruthNetworkFile = "./Cit-HepTh.txt"
-//    val trainingSetFixedFile = new BufferedWriter(new FileWriter("./training_set_fixed.csv"))
-//    val writer = new CSVWriter(trainingSetFixedFile)
 
-    implicit def asArrayList[T](input: List[T]) = new AsArrayList[T](input)
 
     def toDoubleUDF = udf(
       (n: Int) => n.toDouble
@@ -171,24 +150,6 @@ object LinkPrediction {
       .csv(nodeInfoFile)
       .toDF("id", "year", "title", "authors", "journal", "abstract")).cache()
 
-//    //read txt and convert it to array
-//    def readtxtToArray(): java.util.List[Array[String]] = {
-//      ((Source.fromFile(trainingSetFile)
-//        .getLines()
-//        .map(_.split(" ").map(_.trim.toString))).toList).asArrayList
-//    }
-
-
-    //fix the values of years looking future years
-
-
-    //convert it to csv
-
-//    writer.writeAll(readtxtToArray())
-//    trainingSetFixedFile.close()
-
-//    val trainingSet = ss.read
-//      .csv(trainingSetFixedFilePath)
 
     val colNames = Seq("sId", "tId", "labelTmp")
 
@@ -221,7 +182,6 @@ object LinkPrediction {
           .rdd.map(r => (r.getInt(0), r.getInt(1))), 1
       )
     )
-
 
     val transformedTrainingSetDF = transformSet(trainingSetDF, nodeInfoDF, graphDF)
       .cache()
