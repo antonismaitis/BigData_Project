@@ -1,27 +1,35 @@
 import org.apache.spark.graphx._
 import org.apache.spark.ml.classification.{DecisionTreeClassifier, LogisticRegression, RandomForestClassifier}
-import org.apache.spark.ml.clustering.{BisectingKMeans, KMeans}
-import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
+import org.apache.spark.ml.clustering.{ KMeans}
+import org.apache.spark.ml.evaluation.{ClusteringEvaluator, MulticlassClassificationEvaluator}
 import org.apache.spark.ml.feature.{HashingTF, IDF, Tokenizer, VectorAssembler}
 import org.apache.spark.ml.linalg
 import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.{DataFrame, Dataset, Encoders, SparkSession}
-
+import org.apache.spark.SparkConf
 import scala.collection.mutable
-//import org.apache.spark.ml.feature.MinHashLSH
 
-//Comment out after first compile
-case class MyCase(sId: Int, tId:Int, label:Double, sAuthors:String, sYear:Int, sJournal:String,tAuthors:String, tYear:Int,tJournal:String, yearDiff:Int,nCommonAuthors:Int,isSelfCitation:Boolean
-                  ,isSameJournal:Boolean,cosSimTFIDF:Double,sInDegrees:Int,sNeighbors:Array[Long],tInDegrees:Int,tNeighbors:Array[Long],inDegreesDiff:Int,commonNeighbors:Int,jaccardCoefficient:Double)
+//import org.apache.spark.ml.feature.MinHashLSH
 
 
 object LinkPrediction {
   def main(args: Array[String]): Unit = {
     System.setProperty("hadoop.home.dir", "C:\\Program Files\\JetBrains\\IntelliJ IDEA 2018.3\\")
+    val master = "local[*]"
+    val appName = "Link Prediction"
     // Create the spark session first
-    val ss = SparkSession.builder().master("local[*]").appName("Link Prediction").getOrCreate()
-  
+    //    val ss = SparkSession.builder().master("local[*]").appName("Link Prediction").getOrCreate()
+    val conf: SparkConf = new SparkConf()
+      .setMaster(master)
+      .setAppName(appName)
+      .set("spark.driver.allowMultipleContexts", "false")
+      .set("spark.scheduler.mode", "FAIR")
+      .set("spark.ui.enabled", "true")
+
+    val ss: SparkSession = SparkSession.builder().config(conf).getOrCreate()
+
+
     import ss.implicits._ // For implicit conversions like converting RDDs to DataFrames
 
     // Suppress info messages
@@ -83,14 +91,20 @@ object LinkPrediction {
 
       val idf = new IDF().setInputCol("abstractRawFeatures").setOutputCol("abstractFeatures")
       val idfM = idf.fit(featurizedDF)
-      val completeDF = idfM.transform(featurizedDF)
+      val tfidfDF = idfM.transform(featurizedDF)
+
+      val numOfClusters = 6
+      val kMeans = new KMeans().setK(numOfClusters).setFeaturesCol("abstractFeatures").setSeed(1L)
+      val model = kMeans.fit(tfidfDF).setPredictionCol("clusterCenter")
+      val completeDF = model.transform(tfidfDF)
+
       completeDF
     }
 
     def transformSet(input: DataFrame, nodeInfo: DataFrame, graph: DataFrame): DataFrame = {
       val assembler = new VectorAssembler()
         //        .setInputCols(Array("yearDiff", "isSameJournal","cosSimTFIDF"))
-        .setInputCols(Array("yearDiff","nCommonAuthors","isSelfCitation","isSameJournal", "cosSimTFIDF", "tInDegrees", "inDegreesDiff", "commonNeighbors", "jaccardCoefficient"))
+        .setInputCols(Array("yearDiff","nCommonAuthors","isSelfCitation","isSameJournal", "cosSimTFIDF", "tInDegrees", "inDegreesDiff", "commonNeighbors", "jaccardCoefficient","InSameCluster"))
         .setOutputCol("features")
 
       val tempDF = input
@@ -99,6 +113,7 @@ object LinkPrediction {
             $"authors".as("sAuthors"),
             $"year".as("sYear"),
             $"journal".as("sJournal"),
+            $"clusterCenter".as("sCluster"),
             $"abstractFeatures".as("sAbstractFeatures")), $"sId" === $"id")
         .drop("id")
         .join(nodeInfo
@@ -106,12 +121,14 @@ object LinkPrediction {
             $"authors".as("tAuthors"),
             $"year".as("tYear"),
             $"journal".as("tJournal"),
+            $"clusterCenter".as("tCluster"),
             $"abstractFeatures".as("tAbstractFeatures")), $"tId" === $"id")
         .drop("id")
         .withColumn("yearDiff", $"tYear" - $"sYear")
         .withColumn("nCommonAuthors", when($"sAuthors".isNotNull && $"tAuthors".isNotNull, myUDF('sAuthors,'tAuthors)).otherwise(0))
         .withColumn("isSelfCitation", $"nCommonAuthors" >=1 )
         .withColumn("isSameJournal", when($"sJournal" === $"tJournal", true).otherwise(false))
+        .withColumn("InSameCluster",when($"sCluster" === $"tCluster",true).otherwise(false))
         .withColumn("cosSimTFIDF", dotProductUDF($"sAbstractFeatures", $"tAbstractFeatures"))
         .drop("sAbstractFeatures").drop("tAbstractFeatures")
         .join(graph
@@ -150,29 +167,6 @@ object LinkPrediction {
       .csv(nodeInfoFile)
       .toDF("id", "year", "title", "authors", "journal", "abstract")).cache()
 
-    //---------------------------------------------------------
-    val numOfClusters = 4
-    val kmeans = new KMeans().setK(numOfClusters).setFeaturesCol("abstractRawFeatures").setSeed(1L)
-    val model = kmeans.fit(nodeInfoDF)
-    model.transform(nodeInfoDF)
-    nodeInfoDF.show(10)
-    //    val men = Encoders.product[MyCase]
-
-
-    //    val ds: Dataset[MyCase] = transformedTrainingSetDF.as(men)
-
-
-    //KMEANS
-    //    val kmeans = new KMeans().setK(numOfClusters).setSeed(1L)
-    //    val model = kmeans.fit(ds)
-    // Evaluate clustering by computing Within Set Sum of Squared Errors.
-    val WSSSE = model.computeCost(nodeInfoDF)
-    println(s"Within Set Sum of Squared Errors = $WSSSE")
-    // Shows the result.
-    println("Cluster Centers: ")
-    model.clusterCenters.foreach(println)
-
-
     val trainingSetDF = ss.read
       .option("header", "false")
       .option("sep", " ")
@@ -182,7 +176,7 @@ object LinkPrediction {
       .withColumn("label", toDoubleUDF($"labelTmp"))
       .drop("labelTmp")
 
-    trainingSetDF.show(10)
+    //trainingSetDF.show(10)
 
     val testingSetDF = ss.read
       .option("header", "false")
@@ -209,7 +203,7 @@ object LinkPrediction {
     val transformedTestingSetDF = transformSet(testingSetDF, nodeInfoDF, graphDF)
       .cache()
 
-    transformedTestingSetDF.show(10)
+    //transformedTestingSetDF.show(10)
 
     val evaluator = new MulticlassClassificationEvaluator()
       .setLabelCol("label")
@@ -229,7 +223,7 @@ object LinkPrediction {
     val accuracyLR = evaluator.evaluate(predictionsLR)
     println("F1-score of Logistic Regression: " + accuracyLR)
 
-    val RFModel = new RandomForestClassifier()
+    val RFModel = new RandomForestClassifier().setNumTrees(10)
       .fit(transformedTrainingSetDF)
 
     val predictionsRF = RFModel.transform(transformedTestingSetDF)
@@ -242,12 +236,12 @@ object LinkPrediction {
     println("Importance of features: " + RFModel.featureImportances)
 
     val DTModel = new DecisionTreeClassifier()
-      .setMaxDepth(8)
+      .setMaxDepth(10)
       .setImpurity("entropy")
       .fit(transformedTrainingSetDF)
 
     val predictionsDT = DTModel.transform(transformedTestingSetDF)
-    predictionsDT.printSchema()
+    //predictionsDT.printSchema()
     predictionsDT.show(10)
 
     val accuracyDT = evaluator.evaluate(predictionsDT)
