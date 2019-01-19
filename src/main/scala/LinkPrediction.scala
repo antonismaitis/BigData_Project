@@ -20,7 +20,8 @@ object LinkPrediction {
   def main(args: Array[String]): Unit = {
     System.setProperty("hadoop.home.dir", "C:\\Program Files\\JetBrains\\IntelliJ IDEA 2018.3\\")
     // Create the spark session first
-    val ss = SparkSession.builder().master("local").appName("linkPrediction").getOrCreate()
+    val ss = SparkSession.builder().master("local[*]").appName("Link Prediction").getOrCreate()
+  
     import ss.implicits._ // For implicit conversions like converting RDDs to DataFrames
 
     // Suppress info messages
@@ -31,7 +32,6 @@ object LinkPrediction {
     val testingSetFile = "./testing_set.txt"
     val nodeInfoFile = "./node_information.csv"
     val groundTruthNetworkFile = "./Cit-HepTh.txt"
-
 
     def toDoubleUDF = udf(
       (n: Int) => n.toDouble
@@ -75,7 +75,7 @@ object LinkPrediction {
 
     def transformNodeInfo(input: DataFrame): DataFrame = {
       // Create tf-idf features
-      val tokenizer = new Tokenizer().setInputCol("abstract").setOutputCol("abstractWords")
+      val tokenizer = new Tokenizer().setInputCol("abstract").setOutputCol("abstractWords") //STOP - WORDS REMOVAL
       val wordsDF = tokenizer.transform(input.na.fill(Map("abstract" -> "")))
 
       val hashingTF = new HashingTF().setInputCol("abstractWords").setOutputCol("abstractRawFeatures").setNumFeatures(20000)
@@ -150,8 +150,28 @@ object LinkPrediction {
       .csv(nodeInfoFile)
       .toDF("id", "year", "title", "authors", "journal", "abstract")).cache()
 
+    //---------------------------------------------------------
+    val numOfClusters = 4
+    val kmeans = new KMeans().setK(numOfClusters).setFeaturesCol("abstractRawFeatures").setSeed(1L)
+    val model = kmeans.fit(nodeInfoDF)
+    model.transform(nodeInfoDF)
+    nodeInfoDF.show(10)
+    //    val men = Encoders.product[MyCase]
 
-    val colNames = Seq("sId", "tId", "labelTmp")
+
+    //    val ds: Dataset[MyCase] = transformedTrainingSetDF.as(men)
+
+
+    //KMEANS
+    //    val kmeans = new KMeans().setK(numOfClusters).setSeed(1L)
+    //    val model = kmeans.fit(ds)
+    // Evaluate clustering by computing Within Set Sum of Squared Errors.
+    val WSSSE = model.computeCost(nodeInfoDF)
+    println(s"Within Set Sum of Squared Errors = $WSSSE")
+    // Shows the result.
+    println("Cluster Centers: ")
+    model.clusterCenters.foreach(println)
+
 
     val trainingSetDF = ss.read
       .option("header", "false")
@@ -179,13 +199,16 @@ object LinkPrediction {
         trainingSetDF
           .filter($"label" === 1.0)
           .select("sId", "tId")
-          .rdd.map(r => (r.getInt(0), r.getInt(1))), 1
+          .rdd.map(r => (r.getInt(0), r.getInt(1))), 1  // tuples
       )
     )
 
     val transformedTrainingSetDF = transformSet(trainingSetDF, nodeInfoDF, graphDF)
-      .cache()
+      .cache() //for performance
+
     val transformedTestingSetDF = transformSet(testingSetDF, nodeInfoDF, graphDF)
+      .cache()
+
     transformedTestingSetDF.show(10)
 
     val evaluator = new MulticlassClassificationEvaluator()
@@ -219,7 +242,7 @@ object LinkPrediction {
     println("Importance of features: " + RFModel.featureImportances)
 
     val DTModel = new DecisionTreeClassifier()
-      .setMaxDepth(30)
+      .setMaxDepth(8)
       .setImpurity("entropy")
       .fit(transformedTrainingSetDF)
 
@@ -229,37 +252,6 @@ object LinkPrediction {
 
     val accuracyDT = evaluator.evaluate(predictionsDT)
     println("F1-score of Decision Tree : "+accuracyDT)
-
-    val numOfClusters = 2
-
-
-    val men = Encoders.product[MyCase]
-
-    val ds: Dataset[MyCase] = transformedTrainingSetDF.as(men)
-
-
-    //KMEANS
-    val kmeans = new KMeans().setK(numOfClusters).setSeed(1L)
-    val model = kmeans.fit(ds)
-    // Evaluate clustering by computing Within Set Sum of Squared Errors.
-    val WSSSE = model.computeCost(ds)
-    println(s"Within Set Sum of Squared Errors = $WSSSE")
-    // Shows the result.
-    println("Cluster Centers: ")
-    model.clusterCenters.foreach(println)
-
-
-    //BisectingKMEANS
-    val bkm = new BisectingKMeans().setK(numOfClusters).setSeed(1L)
-    val modelB = bkm.fit(ds)
-    // Evaluate clustering.
-    val cost = modelB.computeCost(ds)
-    println(s"Within Set Sum of Squared Errors = $cost")
-    // Shows the result.
-    println("Cluster Centers: ")
-    val centers = modelB.clusterCenters
-    centers.foreach(println)
-
 
 
 //    System.in.read()
