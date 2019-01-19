@@ -7,21 +7,45 @@ import org.apache.spark.ml.linalg
 import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.{DataFrame, Dataset, Encoders, SparkSession}
-
+import org.apache.spark.sql.SparkSession
 import scala.collection.mutable
+import org.apache.spark.SparkConf
 //import org.apache.spark.ml.feature.MinHashLSH
 
+case class Point(dx: Double, dy: Double) {
+  val x: Double = dx
+  val y: Double = dy
+
+  override def toString(): String = {
+    "(" + x + ", " + y + ")"
+  }
+
+  def dist(p: Point): Double = {
+    return (x - p.x) * (x - p.x) + (y - p.y) * (y - p.y);
+  }
+}
 //Comment out after first compile
-case class MyCase(sId: Int, tId:Int, label:Double, sAuthors:String, sYear:Int, sJournal:String,tAuthors:String, tYear:Int,tJournal:String, yearDiff:Int,nCommonAuthors:Int,isSelfCitation:Boolean
-                  ,isSameJournal:Boolean,cosSimTFIDF:Double,sInDegrees:Int,sNeighbors:Array[Long],tInDegrees:Int,tNeighbors:Array[Long],inDegreesDiff:Int,commonNeighbors:Int,jaccardCoefficient:Double)
+case class MyCase(sId: Int, tId: Int, label: Double, sAuthors: String, sYear: Int, sJournal: String, tAuthors: String, tYear: Int, tJournal: String, yearDiff: Int, nCommonAuthors: Int, isSelfCitation: Boolean
+                  , isSameJournal: Boolean, cosSimTFIDF: Double, sInDegrees: Int, sNeighbors: Array[Long], tInDegrees: Int, tNeighbors: Array[Long], inDegreesDiff: Int, commonNeighbors: Int, jaccardCoefficient: Double)
 
 
 object LinkPrediction {
   def main(args: Array[String]): Unit = {
     System.setProperty("hadoop.home.dir", "C:\\Program Files\\JetBrains\\IntelliJ IDEA 2018.3\\")
+    val master = "local[*]"
+    val appName = "Link Prediction"
     // Create the spark session first
-    val ss = SparkSession.builder().master("local[*]").appName("Link Prediction").getOrCreate()
-  
+    //    val ss = SparkSession.builder().master("local[*]").appName("Link Prediction").getOrCreate()
+    val conf: SparkConf = new SparkConf()
+      .setMaster(master)
+      .setAppName(appName)
+      .set("spark.driver.allowMultipleContexts", "false")
+      .set("spark.scheduler.mode", "FAIR")
+      .set("spark.ui.enabled", "true")
+
+    val ss: SparkSession = SparkSession.builder().config(conf).getOrCreate()
+
+
     import ss.implicits._ // For implicit conversions like converting RDDs to DataFrames
 
     // Suppress info messages
@@ -90,7 +114,7 @@ object LinkPrediction {
     def transformSet(input: DataFrame, nodeInfo: DataFrame, graph: DataFrame): DataFrame = {
       val assembler = new VectorAssembler()
         //        .setInputCols(Array("yearDiff", "isSameJournal","cosSimTFIDF"))
-        .setInputCols(Array("yearDiff","nCommonAuthors","isSelfCitation","isSameJournal", "cosSimTFIDF", "tInDegrees", "inDegreesDiff", "commonNeighbors", "jaccardCoefficient"))
+        .setInputCols(Array("yearDiff", "nCommonAuthors", "isSelfCitation", "isSameJournal", "cosSimTFIDF", "tInDegrees", "inDegreesDiff", "commonNeighbors", "jaccardCoefficient"))
         .setOutputCol("features")
 
       val tempDF = input
@@ -109,8 +133,8 @@ object LinkPrediction {
             $"abstractFeatures".as("tAbstractFeatures")), $"tId" === $"id")
         .drop("id")
         .withColumn("yearDiff", $"tYear" - $"sYear")
-        .withColumn("nCommonAuthors", when($"sAuthors".isNotNull && $"tAuthors".isNotNull, myUDF('sAuthors,'tAuthors)).otherwise(0))
-        .withColumn("isSelfCitation", $"nCommonAuthors" >=1 )
+        .withColumn("nCommonAuthors", when($"sAuthors".isNotNull && $"tAuthors".isNotNull, myUDF('sAuthors, 'tAuthors)).otherwise(0))
+        .withColumn("isSelfCitation", $"nCommonAuthors" >= 1)
         .withColumn("isSameJournal", when($"sJournal" === $"tJournal", true).otherwise(false))
         .withColumn("cosSimTFIDF", dotProductUDF($"sAbstractFeatures", $"tAbstractFeatures"))
         .drop("sAbstractFeatures").drop("tAbstractFeatures")
@@ -151,11 +175,47 @@ object LinkPrediction {
       .toDF("id", "year", "title", "authors", "journal", "abstract")).cache()
 
     //---------------------------------------------------------
-    val numOfClusters = 4
-    val kmeans = new KMeans().setK(numOfClusters).setFeaturesCol("abstractRawFeatures").setSeed(1L)
-    val model = kmeans.fit(nodeInfoDF)
+    val numOfClusters = 6
+    var kMeans = new KMeans().setK(numOfClusters).setFeaturesCol("abstractFeatures").setSeed(1L)
+    var model = kMeans.fit(nodeInfoDF).setPredictionCol("clusterCenter")
+    var completeDF = model.transform(nodeInfoDF)
+    var xi = 1
+    var k = 1
+    var psi = 2
+    var n = 1
+    var nodeInfoRowSize =  nodeInfoDF.count().asInstanceOf[Int]
+    val sse = Array()
+    var points = Array.ofDim(2,nodeInfoRowSize.asInstanceOf[Int])
+
+    for( n <- 1 to nodeInfoRowSize){
+      points.apply(nodeInfoDF.select("sId").sample(1, 1).asInstanceOf[Int])(nodeInfoDF.select("tId").sample(1,1).asInstanceOf[Int])
+    }
+
     model.transform(nodeInfoDF)
     nodeInfoDF.show(10)
+
+    // for loop execution with a range
+    for ( k <- 1 to 100)
+    {
+      sse(k) == 0
+      kMeans = new KMeans().setK(k).setFeaturesCol("abstractFeatures").setSeed(1L)
+      model = kMeans.fit(nodeInfoDF).setPredictionCol("clusterCenter")
+      completeDF = model.transform(nodeInfoDF)
+      completeDF.foreach {
+        functionCluster(model)
+      }
+    }
+    def functionCluster(input: KMeans.model): KMeans.model ={
+      val mean = clusterMean(points)
+      kmeans.forEach(function(datapoint) {
+        sse[k] += Math.pow(datapoint - mean, 2)
+      })
+    }
+    def clusterMean(points : Array[Array[Nothing]]): Array[Array[Nothing]] = {
+      val cumulative = points.reduceLeft((a: Point, b: Point) =&gt ,new Point(a.x + b.x, a.y + b.y))
+
+      return new Point(cumulative.x / points.length, cumulative.y / points.length)
+    }
     //    val men = Encoders.product[MyCase]
 
 
@@ -166,95 +226,95 @@ object LinkPrediction {
     //    val kmeans = new KMeans().setK(numOfClusters).setSeed(1L)
     //    val model = kmeans.fit(ds)
     // Evaluate clustering by computing Within Set Sum of Squared Errors.
-    val WSSSE = model.computeCost(nodeInfoDF)
-    println(s"Within Set Sum of Squared Errors = $WSSSE")
-    // Shows the result.
-    println("Cluster Centers: ")
-    model.clusterCenters.foreach(println)
+    //    val WSSSE = model.computeCost(nodeInfoDF)
+    //    println(s"Within Set Sum of Squared Errors = $WSSSE")
+    //    // Shows the result.
+    //    println("Cluster Centers: ")
+    //    model.clusterCenters.foreach(println)
+    //
+    //
+    //    val trainingSetDF = ss.read
+    //      .option("header", "false")
+    //      .option("sep", " ")
+    //      .option("inferSchema", "true")
+    //      .csv(trainingSetFile)
+    //      .toDF("sId", "tId", "labelTmp")
+    //      .withColumn("label", toDoubleUDF($"labelTmp"))
+    //      .drop("labelTmp")
+    //
+    //    trainingSetDF.show(10)
+    //
+    //    val testingSetDF = ss.read
+    //      .option("header", "false")
+    //      .option("sep", " ")
+    //      .option("inferSchema", "true")
+    //      .csv(testingSetFile)
+    //      .toDF("sId", "tId")
+    //      .join(groundTruthNetworkDF, $"sId" === $"gtsId" && $"tId" === $"gttId", "left")
+    //      .drop("gtsId").drop("gttId")
+    //      .withColumn("label", when($"label" === 1.0, $"label").otherwise(0.0))
+    //
+    //    val graphDF = transformGraph(
+    //      Graph.fromEdgeTuples(
+    //        trainingSetDF
+    //          .filter($"label" === 1.0)
+    //          .select("sId", "tId")
+    //          .rdd.map(r => (r.getInt(0), r.getInt(1))), 1  // tuples
+    //      )
+    //    )
+    //
+    //    val transformedTrainingSetDF = transformSet(trainingSetDF, nodeInfoDF, graphDF)
+    //      .cache() //for performance
+    //
+    //    val transformedTestingSetDF = transformSet(testingSetDF, nodeInfoDF, graphDF)
+    //      .cache()
+    //
+    //    transformedTestingSetDF.show(10)
+    //
+    //    val evaluator = new MulticlassClassificationEvaluator()
+    //      .setLabelCol("label")
+    //      .setPredictionCol("prediction")
+    //      .setMetricName("f1")
+    //
+    //    val LRmodel = new LogisticRegression()
+    //      .setMaxIter(10000)
+    //      .setRegParam(0.1)
+    //      .setElasticNetParam(0.0)
+    //      .fit(transformedTrainingSetDF)
+    //
+    //    val predictionsLR = LRmodel.transform(transformedTestingSetDF)
+    //    predictionsLR.printSchema()
+    //    predictionsLR.show(10)
+    //
+    //    val accuracyLR = evaluator.evaluate(predictionsLR)
+    //    println("F1-score of Logistic Regression: " + accuracyLR)
+    //
+    //    val RFModel = new RandomForestClassifier()
+    //      .fit(transformedTrainingSetDF)
+    //
+    //    val predictionsRF = RFModel.transform(transformedTestingSetDF)
+    //    predictionsRF.printSchema()
+    //    predictionsRF.show(10)
+    //
+    //    val accuracyRF = evaluator.evaluate(predictionsRF)
+    //    println("F1-score of Random Forest: " + accuracyRF)
+    //
+    //    println("Importance of features: " + RFModel.featureImportances)
+    //
+    //    val DTModel = new DecisionTreeClassifier()
+    //      .setMaxDepth(8)
+    //      .setImpurity("entropy")
+    //      .fit(transformedTrainingSetDF)
+    //
+    //    val predictionsDT = DTModel.transform(transformedTestingSetDF)
+    //    predictionsDT.printSchema()
+    //    predictionsDT.show(10)
+    //
+    //    val accuracyDT = evaluator.evaluate(predictionsDT)
+    //    println("F1-score of Decision Tree : "+accuracyDT)
 
 
-    val trainingSetDF = ss.read
-      .option("header", "false")
-      .option("sep", " ")
-      .option("inferSchema", "true")
-      .csv(trainingSetFile)
-      .toDF("sId", "tId", "labelTmp")
-      .withColumn("label", toDoubleUDF($"labelTmp"))
-      .drop("labelTmp")
-
-    trainingSetDF.show(10)
-
-    val testingSetDF = ss.read
-      .option("header", "false")
-      .option("sep", " ")
-      .option("inferSchema", "true")
-      .csv(testingSetFile)
-      .toDF("sId", "tId")
-      .join(groundTruthNetworkDF, $"sId" === $"gtsId" && $"tId" === $"gttId", "left")
-      .drop("gtsId").drop("gttId")
-      .withColumn("label", when($"label" === 1.0, $"label").otherwise(0.0))
-
-    val graphDF = transformGraph(
-      Graph.fromEdgeTuples(
-        trainingSetDF
-          .filter($"label" === 1.0)
-          .select("sId", "tId")
-          .rdd.map(r => (r.getInt(0), r.getInt(1))), 1  // tuples
-      )
-    )
-
-    val transformedTrainingSetDF = transformSet(trainingSetDF, nodeInfoDF, graphDF)
-      .cache() //for performance
-
-    val transformedTestingSetDF = transformSet(testingSetDF, nodeInfoDF, graphDF)
-      .cache()
-
-    transformedTestingSetDF.show(10)
-
-    val evaluator = new MulticlassClassificationEvaluator()
-      .setLabelCol("label")
-      .setPredictionCol("prediction")
-      .setMetricName("f1")
-
-    val LRmodel = new LogisticRegression()
-      .setMaxIter(10000)
-      .setRegParam(0.1)
-      .setElasticNetParam(0.0)
-      .fit(transformedTrainingSetDF)
-
-    val predictionsLR = LRmodel.transform(transformedTestingSetDF)
-    predictionsLR.printSchema()
-    predictionsLR.show(10)
-
-    val accuracyLR = evaluator.evaluate(predictionsLR)
-    println("F1-score of Logistic Regression: " + accuracyLR)
-
-    val RFModel = new RandomForestClassifier()
-      .fit(transformedTrainingSetDF)
-
-    val predictionsRF = RFModel.transform(transformedTestingSetDF)
-    predictionsRF.printSchema()
-    predictionsRF.show(10)
-
-    val accuracyRF = evaluator.evaluate(predictionsRF)
-    println("F1-score of Random Forest: " + accuracyRF)
-
-    println("Importance of features: " + RFModel.featureImportances)
-
-    val DTModel = new DecisionTreeClassifier()
-      .setMaxDepth(8)
-      .setImpurity("entropy")
-      .fit(transformedTrainingSetDF)
-
-    val predictionsDT = DTModel.transform(transformedTestingSetDF)
-    predictionsDT.printSchema()
-    predictionsDT.show(10)
-
-    val accuracyDT = evaluator.evaluate(predictionsDT)
-    println("F1-score of Decision Tree : "+accuracyDT)
-
-
-//    System.in.read()
+    //    System.in.read()
     ss.stop()
   }
 }
