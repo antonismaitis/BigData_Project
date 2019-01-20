@@ -8,6 +8,7 @@ import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.{DataFrame, Dataset, Encoders, SparkSession}
 import org.apache.spark.SparkConf
+import org.apache.spark.ml.linalg.Vectors
 import org.apache.spark.ml.{Pipeline, PipelineModel}
 
 import scala.collection.mutable
@@ -21,7 +22,6 @@ object LinkPrediction {
     val master = "local[*]"
     val appName = "Link Prediction"
     // Create the spark session first
-    //    val ss = SparkSession.builder().master("local[*]").appName("Link Prediction").getOrCreate()
     val conf: SparkConf = new SparkConf()
       .setMaster(master)
       .setAppName(appName)
@@ -56,12 +56,17 @@ object LinkPrediction {
         splitted1.intersect(splitted2).length
       })
 
-
-    def dotProductUDF = udf(
+    def cosineSimilarityUDF = udf(
       (a: linalg.Vector, b: linalg.Vector) => {
-        val aArr = a.toArray
-        val bArr = b.toArray
-        aArr.zip(bArr).map(t => t._1 * t._2).sum
+        val emptyVec = Vectors.zeros(a.size)
+        if (a.equals(emptyVec) || b.equals(emptyVec)) {
+          0.0
+        } else {
+          val aArr = a.toArray
+          val bArr = b.toArray
+          val dotProduct = aArr.zip(bArr).map(t => t._1 * t._2).sum
+          dotProduct / Math.sqrt(Vectors.sqdist(a, emptyVec) * Vectors.sqdist(b, emptyVec))
+        }
       }
     )
 
@@ -129,7 +134,7 @@ object LinkPrediction {
         .withColumn("isSelfCitation", $"nCommonAuthors" >= 1)
         .withColumn("isSameJournal", when($"sJournal" === $"tJournal", true).otherwise(false))
         .withColumn("InSameCluster", when($"sCluster" === $"tCluster", true).otherwise(false))
-        .withColumn("cosSimTFIDF", dotProductUDF($"sAbstractFeatures", $"tAbstractFeatures"))
+        .withColumn("cosSimTFIDF", cosineSimilarityUDF($"sAbstractFeatures", $"tAbstractFeatures"))
         .drop("sAbstractFeatures").drop("tAbstractFeatures")
         .join(graph
           .select($"id",
@@ -223,7 +228,9 @@ object LinkPrediction {
     val accuracyLR = evaluator.evaluate(predictionsLR)
     println("F1-score of Logistic Regression: " + accuracyLR)
 
-    val RFModel = new RandomForestClassifier().setNumTrees(10)
+    val RFModel = new RandomForestClassifier()
+      .setSeed(SEED)
+      .setNumTrees(10)
       .fit(transformedTrainingSetDF)
 
     val predictionsRF = RFModel.transform(transformedTestingSetDF)
@@ -236,6 +243,7 @@ object LinkPrediction {
     println("Importance of features: " + RFModel.featureImportances)
 
     val DTModel = new DecisionTreeClassifier()
+      .setSeed(SEED)
       .setMaxDepth(10)
       .setImpurity("entropy")
       .fit(transformedTrainingSetDF)
