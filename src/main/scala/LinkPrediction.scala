@@ -1,13 +1,15 @@
 import org.apache.spark.graphx._
 import org.apache.spark.ml.classification.{DecisionTreeClassifier, LogisticRegression, RandomForestClassifier}
-import org.apache.spark.ml.clustering.{ KMeans}
+import org.apache.spark.ml.clustering.KMeans
 import org.apache.spark.ml.evaluation.{ClusteringEvaluator, MulticlassClassificationEvaluator}
-import org.apache.spark.ml.feature.{HashingTF, IDF, Tokenizer, VectorAssembler}
+import org.apache.spark.ml.feature._
 import org.apache.spark.ml.linalg
 import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.{DataFrame, Dataset, Encoders, SparkSession}
 import org.apache.spark.SparkConf
+import org.apache.spark.ml.{Pipeline, PipelineModel}
+
 import scala.collection.mutable
 
 //import org.apache.spark.ml.feature.MinHashLSH
@@ -40,6 +42,8 @@ object LinkPrediction {
     val testingSetFile = "./testing_set.txt"
     val nodeInfoFile = "./node_information.csv"
     val groundTruthNetworkFile = "./Cit-HepTh.txt"
+
+    val SEED = 1L
 
     def toDoubleUDF = udf(
       (n: Int) => n.toDouble
@@ -83,28 +87,24 @@ object LinkPrediction {
 
     def transformNodeInfo(input: DataFrame): DataFrame = {
       // Create tf-idf features
-      val tokenizer = new Tokenizer().setInputCol("abstract").setOutputCol("abstractWords") //STOP - WORDS REMOVAL
-      val wordsDF = tokenizer.transform(input.na.fill(Map("abstract" -> "")))
-
-      val hashingTF = new HashingTF().setInputCol("abstractWords").setOutputCol("abstractRawFeatures").setNumFeatures(20000)
-      val featurizedDF = hashingTF.transform(wordsDF)
-
-      val idf = new IDF().setInputCol("abstractRawFeatures").setOutputCol("abstractFeatures")
-      val idfM = idf.fit(featurizedDF)
-      val tfidfDF = idfM.transform(featurizedDF)
-
+      val tokenizer = new Tokenizer().setInputCol("abstract").setOutputCol("abstractWords")
+      val remover = new StopWordsRemover().setInputCol(tokenizer.getOutputCol).setOutputCol("abstractFilteredWords")
+      val hashingTF = new HashingTF().setInputCol(remover.getOutputCol).setOutputCol("abstractRawFeatures").setNumFeatures(20000)
+      val idf = new IDF().setInputCol(hashingTF.getOutputCol).setOutputCol("abstractFeatures")
       val numOfClusters = 6
-      val kMeans = new KMeans().setK(numOfClusters).setFeaturesCol("abstractFeatures").setSeed(1L)
-      val model = kMeans.fit(tfidfDF).setPredictionCol("clusterCenter")
-      val completeDF = model.transform(tfidfDF)
+      val kMeans = new KMeans().setK(numOfClusters).setFeaturesCol(idf.getOutputCol).setSeed(SEED).setPredictionCol("cluster")
+      val pipeline = new Pipeline().setStages(Array(tokenizer, remover, hashingTF, idf, kMeans))
 
-      completeDF
+      val inputCleanedDF = input.na.fill(Map("abstract" -> ""))
+      val model = pipeline.fit(inputCleanedDF)
+
+      model.transform(inputCleanedDF)
     }
 
     def transformSet(input: DataFrame, nodeInfo: DataFrame, graph: DataFrame): DataFrame = {
       val assembler = new VectorAssembler()
         //        .setInputCols(Array("yearDiff", "isSameJournal","cosSimTFIDF"))
-        .setInputCols(Array("yearDiff","nCommonAuthors","isSelfCitation","isSameJournal", "cosSimTFIDF", "tInDegrees", "inDegreesDiff", "commonNeighbors", "jaccardCoefficient","InSameCluster"))
+        .setInputCols(Array("yearDiff", "nCommonAuthors", "isSelfCitation", "isSameJournal", "cosSimTFIDF", "tInDegrees", "inDegreesDiff", "commonNeighbors", "jaccardCoefficient", "InSameCluster"))
         .setOutputCol("features")
 
       val tempDF = input
@@ -113,7 +113,7 @@ object LinkPrediction {
             $"authors".as("sAuthors"),
             $"year".as("sYear"),
             $"journal".as("sJournal"),
-            $"clusterCenter".as("sCluster"),
+            $"cluster".as("sCluster"),
             $"abstractFeatures".as("sAbstractFeatures")), $"sId" === $"id")
         .drop("id")
         .join(nodeInfo
@@ -121,14 +121,14 @@ object LinkPrediction {
             $"authors".as("tAuthors"),
             $"year".as("tYear"),
             $"journal".as("tJournal"),
-            $"clusterCenter".as("tCluster"),
+            $"cluster".as("tCluster"),
             $"abstractFeatures".as("tAbstractFeatures")), $"tId" === $"id")
         .drop("id")
         .withColumn("yearDiff", $"tYear" - $"sYear")
-        .withColumn("nCommonAuthors", when($"sAuthors".isNotNull && $"tAuthors".isNotNull, myUDF('sAuthors,'tAuthors)).otherwise(0))
-        .withColumn("isSelfCitation", $"nCommonAuthors" >=1 )
+        .withColumn("nCommonAuthors", when($"sAuthors".isNotNull && $"tAuthors".isNotNull, myUDF('sAuthors, 'tAuthors)).otherwise(0))
+        .withColumn("isSelfCitation", $"nCommonAuthors" >= 1)
         .withColumn("isSameJournal", when($"sJournal" === $"tJournal", true).otherwise(false))
-        .withColumn("InSameCluster",when($"sCluster" === $"tCluster",true).otherwise(false))
+        .withColumn("InSameCluster", when($"sCluster" === $"tCluster", true).otherwise(false))
         .withColumn("cosSimTFIDF", dotProductUDF($"sAbstractFeatures", $"tAbstractFeatures"))
         .drop("sAbstractFeatures").drop("tAbstractFeatures")
         .join(graph
@@ -193,7 +193,7 @@ object LinkPrediction {
         trainingSetDF
           .filter($"label" === 1.0)
           .select("sId", "tId")
-          .rdd.map(r => (r.getInt(0), r.getInt(1))), 1  // tuples
+          .rdd.map(r => (r.getInt(0), r.getInt(1))), 1 // tuples
       )
     )
 
@@ -245,10 +245,9 @@ object LinkPrediction {
     predictionsDT.show(10)
 
     val accuracyDT = evaluator.evaluate(predictionsDT)
-    println("F1-score of Decision Tree : "+accuracyDT)
+    println("F1-score of Decision Tree : " + accuracyDT)
 
-
-//    System.in.read()
+    System.in.read()
     ss.stop()
   }
 }
