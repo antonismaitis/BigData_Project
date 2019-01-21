@@ -1,7 +1,8 @@
-import org.apache.spark.ml.classification._
+import org.apache.spark.SparkConf
+import org.apache.spark.ml.classification.{LogisticRegression, RandomForestClassifier}
 import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
 import org.apache.spark.ml.feature._
-import org.apache.spark.ml.linalg
+import org.apache.spark.ml.{Pipeline, linalg}
 import org.apache.spark.ml.linalg.Vectors
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.{DataFrame, SparkSession}
@@ -10,19 +11,24 @@ object LinkPredictionPartB {
   def main(args: Array[String]): Unit = {
 
     // Create the spark session first
-    val ss = SparkSession.builder().master("local").appName("linkPrediction")
-      .config("spark.sql.shuffle.partitions", 8)
-      .getOrCreate()
+    System.setProperty("hadoop.home.dir", "C:\\Program Files\\JetBrains\\IntelliJ IDEA 2018.3\\")
+    val master = "local[*]"
+    val appName = "Link Prediction Part B"
+    // Create the spark session first
+    val conf: SparkConf = new SparkConf()
+      .setMaster(master)
+      .setAppName(appName)
+      .set("spark.driver.allowMultipleContexts", "false")
+      .set("spark.scheduler.mode", "FAIR")
+      .set("spark.ui.enabled", "true")
+
+    val ss: SparkSession = SparkSession.builder().config(conf).getOrCreate()
+
     import ss.implicits._ // For implicit conversions like converting RDDs to DataFrames
 
     // Suppress info messages
     ss.sparkContext.setLogLevel("ERROR")
 
-    //    ss.sqlContext.setConf("spark.sql.shuffle.partitions", "8")
-
-
-    val trainingSetFile = "./training_set.txt"
-    val testingSetFile = "./testing_set.txt"
     val nodeInfoFile = "./node_information.csv"
     val groundTruthNetworkFile = "./Cit-HepTh.txt"
 
@@ -37,7 +43,6 @@ object LinkPredictionPartB {
         val zippedArr = aArr.zip(bArr)
         zippedArr.map(t => t._1 * t._2).sum /
           zippedArr.map(t => t._1 + t._2).count(t => t != 0.0).toDouble
-
       }
     )
 
@@ -45,45 +50,74 @@ object LinkPredictionPartB {
       (vec: linalg.Vector) => vec.equals(Vectors.zeros(vec.size))
     )
 
-    def transformNodeInfo(input: DataFrame): DataFrame = {
-      val tokenizer = new Tokenizer().setInputCol("abstract").setOutputCol("abstractWords")
-      val wordsDF = tokenizer.transform(input.na.fill(Map("abstract" -> "")))
+    def filterAndEvaluate(input: DataFrame, arr: Array[Double]) = {
+      arr.foreach(jaccardSimilarityThreshold => {
+        println("*************************************************")
+        println("Jaccard Similarity Threshold: ", jaccardSimilarityThreshold)
 
-      val remover = new StopWordsRemover()
-        .setInputCol("abstractWords")
-        .setOutputCol("abstractFilteredWords")
-      val filteredWordsDF = remover.transform(wordsDF)
+        val filteredDF = input.filter($"jaccardSimilarity" > jaccardSimilarityThreshold)
 
-      val cvModel: CountVectorizerModel = new CountVectorizer()
-        .setInputCol("abstractFilteredWords")
-        .setOutputCol("abstractFeatures")
-        .setBinary(true)
-        .fit(filteredWordsDF)
-
-      val completeDF = cvModel.transform(filteredWordsDF)
-      completeDF.filter($"abstract" =!= "")
-        .filter(!vectorEmpty($"abstractFeatures"))
+        println("Filtered count: ", filteredDF.count())
+        println("Correctly labeled: ", filteredDF.filter($"correct" === 1.0).count())
+        println("Incorrectly labeled: ", filteredDF.filter($"correct" === 0.0).count())
+        println("\n")
+      })
     }
 
 
-    def transformSet(input: DataFrame, nodeInfo: DataFrame): DataFrame = {
-      val assembler = new VectorAssembler()
-        .setInputCols(Array("jaccardSimilarity"))
-        .setOutputCol("features")
+    def transformNodeInfo(input: DataFrame): DataFrame = {
+      val abstractTokenizer = new RegexTokenizer()
+        .setMinTokenLength(3)
+        .setInputCol("abstract")
+        .setOutputCol("abstractWords")
+      val abstractRemover = new StopWordsRemover()
+        .setInputCol(abstractTokenizer.getOutputCol)
+        .setOutputCol("abstractFilteredWords")
+      val abstractHashingTF = new HashingTF()
+        .setInputCol(abstractRemover.getOutputCol)
+        .setOutputCol("abstractFeatures")
+        .setBinary(true)
+      val abstractCountVectorizer = new CountVectorizer()
+        .setInputCol(abstractRemover.getOutputCol)
+        .setOutputCol("abstractFeatures")
+        .setBinary(true)
 
-      val tempDF = input
-        .join(nodeInfo
-          .select($"id",
-            $"abstractFeatures".as("sAbstractFeatures")), $"sId" === $"id")
-        .drop("id")
-        .join(nodeInfo
-          .select($"id",
-            $"abstractFeatures".as("tAbstractFeatures")), $"tId" === $"id")
-        .drop("id")
-        .withColumn("jaccardSimilarity", jaccardSimilarity($"sAbstractFeatures", $"tAbstractFeatures"))
-        .drop("sAbstractFeatures").drop("tAbstractFeatures")
+      val titleTokenizer = new RegexTokenizer()
+        .setMinTokenLength(3)
+        .setInputCol("title")
+        .setOutputCol("titleWords")
+      val titleRemover = new StopWordsRemover()
+        .setInputCol(titleTokenizer.getOutputCol)
+        .setOutputCol("titleFilteredWords")
+      val titleHashingTF = new HashingTF()
+        .setNumFeatures(20000)
+        .setInputCol(titleRemover.getOutputCol)
+        .setOutputCol("titleFeatures")
+        .setBinary(true)
+      val titleCountVectorizer = new CountVectorizer()
+        .setInputCol(titleRemover.getOutputCol)
+        .setOutputCol("titleFeatures")
+        .setBinary(true)
 
-      assembler.transform(tempDF)
+      val pipeline = new Pipeline()
+        .setStages(
+          Array(
+            abstractTokenizer, abstractRemover, abstractCountVectorizer,
+            titleTokenizer, titleRemover, titleCountVectorizer
+          )
+        )
+
+      val inputCleanedDF = input
+        .na.fill(Map("abstract" -> "", "title" -> ""))
+
+      val model = pipeline.fit(inputCleanedDF)
+
+      model
+        .transform(inputCleanedDF)
+        .filter($"abstract" =!= "")
+        .filter(!vectorEmpty($"abstractFeatures"))
+        .filter($"title" =!= "")
+        .filter(!vectorEmpty($"titleFeatures"))
     }
 
     // Read the contents of files in dataframes
@@ -103,78 +137,52 @@ object LinkPredictionPartB {
         .csv(nodeInfoFile)
         .toDF("id", "year", "title", "authors", "journal", "abstract")).cache()
 
+    //    nodeInfoDF.show(false)
 
-    val trainingSetDF = ss.read
-      .option("header", "false")
-      .option("sep", " ")
-      .option("inferSchema", "true")
-      .csv(trainingSetFile)
-      .toDF("sId", "tId", "labelTmp")
-      .withColumn("label", toDoubleUDF($"labelTmp"))
-      .drop("labelTmp")
-
-    trainingSetDF.show(10)
-
-    val testingSetDF = ss.read
-      .option("header", "false")
-      .option("sep", " ")
-      .option("inferSchema", "true")
-      .csv(testingSetFile)
-      .toDF("sId", "tId")
-      .join(groundTruthNetworkDF, $"sId" === $"gtsId" && $"tId" === $"gttId", "left")
-      .drop("gtsId").drop("gttId")
-      .withColumn("label", when($"label" === 1.0, $"label").otherwise(0.0))
 
     val mh = new MinHashLSH()
-      //      .setNumHashTables(5)
+      .setNumHashTables(5)
       .setInputCol("abstractFeatures")
       .setOutputCol("hashes")
 
-    val nodeInfoSampleDF = nodeInfoDF.sample(false, 0.1);
+    //    val nodeInfoSampleDF = nodeInfoDF.sample(false, 0.1);
 
     val model = mh.fit(nodeInfoDF)
 
     val transformedNodeInfoDF = model.transform(nodeInfoDF).cache()
 
     // Approximate similarity join
-    model.approxSimilarityJoin(transformedNodeInfoDF, transformedNodeInfoDF, 0.6).filter("datasetA.id < datasetB.id").count
+    val approxSimJoinDF = model.approxSimilarityJoin(transformedNodeInfoDF, transformedNodeInfoDF, 0.95, "JaccardDistance")
+      .select($"datasetA.id".as("idA"),
+        $"datasetA.abstractFeatures".as("abstractFeaturesA"),
+        $"datasetA.year".as("yearA"),
+        $"datasetB.id".as("idB"),
+        $"datasetB.abstractFeatures".as("abstractFeaturesB"),
+        $"datasetB.year".as("yearB"),
+        $"JaccardDistance")
+      .filter("idA < idB")
 
-
-
-
-    val transformedTrainingSetDF = transformSet(trainingSetDF, nodeInfoDF)
+    val transformedDF = approxSimJoinDF
+      .withColumn("sId", when($"yearA" > $"yearB", $"idA").otherwise($"idB"))
+      .withColumn("tId", when($"yearA" > $"yearB", $"idB").otherwise($"idA"))
+      .join(groundTruthNetworkDF, $"sId" === $"gtsId" && $"tId" === $"gttId", "left")
+      .drop("gtsId").drop("gttId")
+      .withColumn("correct", when($"label" === 1.0, $"label").otherwise(0.0))
+      .withColumn("jaccardSimilarity", jaccardSimilarity($"abstractFeaturesA", $"abstractFeaturesB"))
+      .drop("abstractFeaturesA").drop("abstractFeaturesB")
       .cache()
-    val transformedTestingSetDF = transformSet(testingSetDF, nodeInfoDF)
-      .cache()
-    transformedTestingSetDF.show(10)
 
-    val evaluator = new MulticlassClassificationEvaluator()
-      .setLabelCol("label")
-      .setPredictionCol("prediction")
-      .setMetricName("f1")
+    println("Total count: ", transformedDF.count())
 
-    val LRmodel = new LogisticRegression()
-      .setMaxIter(10000)
-      .setRegParam(0.1)
-      .setElasticNetParam(0.0)
-      .fit(transformedTrainingSetDF)
+    filterAndEvaluate(transformedDF, Array(0.05, 0.1, 0.15, 0.2, 0.25))
 
-    val predictionsLR = LRmodel.transform(transformedTestingSetDF)
-    predictionsLR.printSchema()
-    predictionsLR.show(10)
-
-    val accuracyLR = evaluator.evaluate(predictionsLR)
-    println("F1-score of Logistic Regression: " + accuracyLR)
-
-    val RFModel = new RandomForestClassifier()
-      .fit(transformedTrainingSetDF)
-
-    val predictionsRF = RFModel.transform(transformedTestingSetDF)
-    predictionsRF.printSchema()
-    predictionsRF.show(10)
-
-    val accuracyRF = evaluator.evaluate(predictionsRF)
-    println("F1-score of Random Forest: " + accuracyRF)
+    //    val filteredDF = transformedDF.filter($"jaccardSimilarity" > 0.1)
+    //
+    //    filteredDF.printSchema()
+    //    filteredDF.show(false)
+    //    println("Filtered count: ",filteredDF.count())
+    //    println("Correctly labeled: ",filteredDF.filter($"correct" === 1.0).count())
+    //    println("Incorrectly labeled: ",filteredDF.filter($"correct" === 0.0).count())
 
     System.in.read()
     ss.stop()
