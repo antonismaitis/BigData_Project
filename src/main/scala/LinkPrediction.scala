@@ -1,6 +1,6 @@
 import org.apache.spark.graphx._
 import org.apache.spark.ml.classification.{DecisionTreeClassifier, LogisticRegression, RandomForestClassifier}
-import org.apache.spark.ml.clustering.{ KMeans}
+import org.apache.spark.ml.clustering.{KMeans}
 import org.apache.spark.ml.evaluation.{ClusteringEvaluator, MulticlassClassificationEvaluator}
 import org.apache.spark.ml.feature.{HashingTF, IDF, Tokenizer, VectorAssembler}
 import org.apache.spark.ml.linalg
@@ -9,7 +9,8 @@ import org.apache.spark.sql.functions._
 import org.apache.spark.sql.{DataFrame, Dataset, Encoders, SparkSession}
 import org.apache.spark.SparkConf
 import scala.collection.mutable
-
+import org.apache.spark.annotation.DeveloperApi
+import org.apache.spark.deploy.SparkHadoopUtil
 //import org.apache.spark.ml.feature.MinHashLSH
 
 
@@ -19,19 +20,27 @@ object LinkPrediction {
     val master = "local[*]"
     val appName = "Link Prediction"
     // Create the spark session first
-    //    val ss = SparkSession.builder().master("local[*]").appName("Link Prediction").getOrCreate()
     val conf: SparkConf = new SparkConf()
       .setMaster(master)
       .setAppName(appName)
       .set("spark.driver.allowMultipleContexts", "false")
+      .set("spark.scheduler.allocation.file", "src/resources/fairscheduler.xml")
+      .set("spark.scheduler.pool", "default")
       .set("spark.scheduler.mode", "FAIR")
       .set("spark.ui.enabled", "true")
-
+      .set("spark.memory.fraction", "1")
+      .set("spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version", "2")
+      .set("spark.default.parallelism", "100")
+      .set("spark.sql.shuffle.partitions", "42") //Number of partitions = Total input dataset size / partition size => 1500 / 64 = 23.43 = ~23 partitions.
+//      .set("spark.task.cpus", "1")
+//      .set("spark.dynamicAllocation.enabled", "true")
+//      .set("spark.dynamicAllocation.minExecutors", "1")
+//      .set("spark.dynamicAllocation.executorAllocationRatio", "1")
+//      .set("spark.streaming.backpressure.enabled", "true")
+//      .set("spark.streaming.blockInterval", "250ms")
     val ss: SparkSession = SparkSession.builder().config(conf).getOrCreate()
-
-
+    val hadoopConfiguration = SparkHadoopUtil.get.newConfiguration(conf)
     import ss.implicits._ // For implicit conversions like converting RDDs to DataFrames
-
     // Suppress info messages
     ss.sparkContext.setLogLevel("ERROR")
 
@@ -101,10 +110,10 @@ object LinkPrediction {
       completeDF
     }
 
-    def transformSet(input: DataFrame, nodeInfo: DataFrame, graph: DataFrame): DataFrame = {
+    def transformSetTest(input: DataFrame, nodeInfo: DataFrame, graph: DataFrame): DataFrame = {
       val assembler = new VectorAssembler()
         //        .setInputCols(Array("yearDiff", "isSameJournal","cosSimTFIDF"))
-        .setInputCols(Array("yearDiff","nCommonAuthors","isSelfCitation","isSameJournal", "cosSimTFIDF", "tInDegrees", "inDegreesDiff", "commonNeighbors", "jaccardCoefficient","InSameCluster"))
+        .setInputCols(Array("yearDiff", "nCommonAuthors", "isSelfCitation", "isSameJournal", "cosSimTFIDF", "tInDegrees", "inDegreesDiff", "commonNeighbors", "jaccardCoefficient", "InSameCluster"))
         .setOutputCol("features")
 
       val tempDF = input
@@ -125,10 +134,10 @@ object LinkPrediction {
             $"abstractFeatures".as("tAbstractFeatures")), $"tId" === $"id")
         .drop("id")
         .withColumn("yearDiff", $"tYear" - $"sYear")
-        .withColumn("nCommonAuthors", when($"sAuthors".isNotNull && $"tAuthors".isNotNull, myUDF('sAuthors,'tAuthors)).otherwise(0))
-        .withColumn("isSelfCitation", $"nCommonAuthors" >=1 )
+        .withColumn("nCommonAuthors", when($"sAuthors".isNotNull && $"tAuthors".isNotNull, myUDF('sAuthors, 'tAuthors)).otherwise(0))
+        .withColumn("isSelfCitation", $"nCommonAuthors" >= 1)
         .withColumn("isSameJournal", when($"sJournal" === $"tJournal", true).otherwise(false))
-        .withColumn("InSameCluster",when($"sCluster" === $"tCluster",true).otherwise(false))
+        .withColumn("InSameCluster", when($"sCluster" === $"tCluster", true).otherwise(false))
         .withColumn("cosSimTFIDF", dotProductUDF($"sAbstractFeatures", $"tAbstractFeatures"))
         .drop("sAbstractFeatures").drop("tAbstractFeatures")
         .join(graph
@@ -146,9 +155,61 @@ object LinkPrediction {
         .withColumn("inDegreesDiff", $"tInDegrees" - $"sInDegrees")
         .withColumn("commonNeighbors", when($"sNeighbors".isNotNull && $"tNeighbors".isNotNull, commonNeighbors($"sNeighbors", $"tNeighbors")).otherwise(0))
         .withColumn("jaccardCoefficient", when($"sNeighbors".isNotNull && $"tNeighbors".isNotNull, jaccardCoefficient($"sNeighbors", $"tNeighbors")).otherwise(0))
-        .filter($"sYear" > $"tYear")
 
       assembler.transform(tempDF)
+
+    }
+
+    def transformSetTrain(input: DataFrame, nodeInfo: DataFrame, graph: DataFrame): DataFrame = {
+      val assembler = new VectorAssembler()
+        //        .setInputCols(Array("yearDiff", "isSameJournal","cosSimTFIDF"))
+        .setInputCols(Array("yearDiff", "nCommonAuthors", "isSelfCitation", "isSameJournal", "cosSimTFIDF", "tInDegrees", "inDegreesDiff", "commonNeighbors", "jaccardCoefficient", "InSameCluster"))
+        .setOutputCol("features")
+
+      val tempDF = input
+        .join(nodeInfo
+          .select($"id",
+            $"authors".as("sAuthors"),
+            $"year".as("sYear"),
+            $"journal".as("sJournal"),
+            $"clusterCenter".as("sCluster"),
+            $"abstractFeatures".as("sAbstractFeatures")), $"sId" === $"id")
+        .drop("id")
+        .join(nodeInfo
+          .select($"id",
+            $"authors".as("tAuthors"),
+            $"year".as("tYear"),
+            $"journal".as("tJournal"),
+            $"clusterCenter".as("tCluster"),
+            $"abstractFeatures".as("tAbstractFeatures")), $"tId" === $"id")
+        .drop("id")
+        .withColumn("yearDiff", $"tYear" - $"sYear")
+        .filter($"yearDiff" < 1)
+        .withColumn("nCommonAuthors", when($"sAuthors".isNotNull && $"tAuthors".isNotNull, myUDF('sAuthors, 'tAuthors)).otherwise(0))
+        .withColumn("isSelfCitation", $"nCommonAuthors" >= 1)
+        .withColumn("isSameJournal", when($"sJournal" === $"tJournal", true).otherwise(false))
+        .withColumn("InSameCluster", when($"sCluster" === $"tCluster", true).otherwise(false))
+        .withColumn("cosSimTFIDF", dotProductUDF($"sAbstractFeatures", $"tAbstractFeatures"))
+        .drop("sAbstractFeatures").drop("tAbstractFeatures")
+        .join(graph
+          .select($"id",
+            $"inDegrees".as("sInDegrees"),
+            $"neighbors".as("sNeighbors")), $"sId" === $"id", "left")
+        .na.fill(Map("sInDegrees" -> 0))
+        .drop("id")
+        .join(graph
+          .select($"id",
+            $"inDegrees".as("tInDegrees"),
+            $"neighbors".as("tNeighbors")), $"tId" === $"id", "left")
+        .na.fill(Map("tInDegrees" -> 0))
+        .drop("id")
+        .withColumn("inDegreesDiff", $"tInDegrees" - $"sInDegrees")
+        .withColumn("commonNeighbors", when($"sNeighbors".isNotNull && $"tNeighbors".isNotNull, commonNeighbors($"sNeighbors", $"tNeighbors")).otherwise(0))
+        .withColumn("jaccardCoefficient", when($"sNeighbors".isNotNull && $"tNeighbors".isNotNull, jaccardCoefficient($"sNeighbors", $"tNeighbors")).otherwise(0))
+        .filter($"sYear" >= $"tYear")
+
+      assembler.transform(tempDF)
+
     }
 
     // Read the contents of files in dataframes
@@ -193,14 +254,14 @@ object LinkPrediction {
         trainingSetDF
           .filter($"label" === 1.0)
           .select("sId", "tId")
-          .rdd.map(r => (r.getInt(0), r.getInt(1))), 1  // tuples
+          .rdd.map(r => (r.getInt(0), r.getInt(1))), 1 // tuples
       )
     )
 
-    val transformedTrainingSetDF = transformSet(trainingSetDF, nodeInfoDF, graphDF)
+    val transformedTrainingSetDF = transformSetTrain(trainingSetDF, nodeInfoDF, graphDF)
       .cache() //for performance
 
-    val transformedTestingSetDF = transformSet(testingSetDF, nodeInfoDF, graphDF)
+    val transformedTestingSetDF = transformSetTest(testingSetDF, nodeInfoDF, graphDF)
       .cache()
 
     //transformedTestingSetDF.show(10)
@@ -245,10 +306,10 @@ object LinkPrediction {
     predictionsDT.show(10)
 
     val accuracyDT = evaluator.evaluate(predictionsDT)
-    println("F1-score of Decision Tree : "+accuracyDT)
+    println("F1-score of Decision Tree : " + accuracyDT)
 
 
-//    System.in.read()
+    //    System.in.read()
     ss.stop()
   }
 }
