@@ -43,7 +43,6 @@ object LinkPrediction {
     import ss.implicits._ // For implicit conversions like converting RDDs to DataFrames
     // Suppress info messages
     ss.sparkContext.setLogLevel("ERROR")
-
     val currentDir = System.getProperty("user.dir") // get the current directory
     val trainingSetFile = "./training_set.txt"
     val testingSetFile = "./testing_set.txt"
@@ -110,7 +109,7 @@ object LinkPrediction {
       completeDF
     }
 
-    def transformSetTest(input: DataFrame, nodeInfo: DataFrame, graph: DataFrame): DataFrame = {
+    def transformSet(input: DataFrame, nodeInfo: DataFrame, graph: DataFrame): DataFrame = {
       val assembler = new VectorAssembler()
         //        .setInputCols(Array("yearDiff", "isSameJournal","cosSimTFIDF"))
         .setInputCols(Array("yearDiff", "nCommonAuthors", "isSelfCitation", "isSameJournal", "cosSimTFIDF", "tInDegrees", "inDegreesDiff", "commonNeighbors", "jaccardCoefficient", "InSameCluster"))
@@ -155,58 +154,6 @@ object LinkPrediction {
         .withColumn("inDegreesDiff", $"tInDegrees" - $"sInDegrees")
         .withColumn("commonNeighbors", when($"sNeighbors".isNotNull && $"tNeighbors".isNotNull, commonNeighbors($"sNeighbors", $"tNeighbors")).otherwise(0))
         .withColumn("jaccardCoefficient", when($"sNeighbors".isNotNull && $"tNeighbors".isNotNull, jaccardCoefficient($"sNeighbors", $"tNeighbors")).otherwise(0))
-
-      assembler.transform(tempDF)
-
-    }
-
-    def transformSetTrain(input: DataFrame, nodeInfo: DataFrame, graph: DataFrame): DataFrame = {
-      val assembler = new VectorAssembler()
-        //        .setInputCols(Array("yearDiff", "isSameJournal","cosSimTFIDF"))
-        .setInputCols(Array("yearDiff", "nCommonAuthors", "isSelfCitation", "isSameJournal", "cosSimTFIDF", "tInDegrees", "inDegreesDiff", "commonNeighbors", "jaccardCoefficient", "InSameCluster"))
-        .setOutputCol("features")
-
-      val tempDF = input
-        .join(nodeInfo
-          .select($"id",
-            $"authors".as("sAuthors"),
-            $"year".as("sYear"),
-            $"journal".as("sJournal"),
-            $"clusterCenter".as("sCluster"),
-            $"abstractFeatures".as("sAbstractFeatures")), $"sId" === $"id")
-        .drop("id")
-        .join(nodeInfo
-          .select($"id",
-            $"authors".as("tAuthors"),
-            $"year".as("tYear"),
-            $"journal".as("tJournal"),
-            $"clusterCenter".as("tCluster"),
-            $"abstractFeatures".as("tAbstractFeatures")), $"tId" === $"id")
-        .drop("id")
-        .withColumn("yearDiff", $"tYear" - $"sYear")
-        .filter($"yearDiff" < 1)
-        .withColumn("nCommonAuthors", when($"sAuthors".isNotNull && $"tAuthors".isNotNull, myUDF('sAuthors, 'tAuthors)).otherwise(0))
-        .withColumn("isSelfCitation", $"nCommonAuthors" >= 1)
-        .withColumn("isSameJournal", when($"sJournal" === $"tJournal", true).otherwise(false))
-        .withColumn("InSameCluster", when($"sCluster" === $"tCluster", true).otherwise(false))
-        .withColumn("cosSimTFIDF", dotProductUDF($"sAbstractFeatures", $"tAbstractFeatures"))
-        .drop("sAbstractFeatures").drop("tAbstractFeatures")
-        .join(graph
-          .select($"id",
-            $"inDegrees".as("sInDegrees"),
-            $"neighbors".as("sNeighbors")), $"sId" === $"id", "left")
-        .na.fill(Map("sInDegrees" -> 0))
-        .drop("id")
-        .join(graph
-          .select($"id",
-            $"inDegrees".as("tInDegrees"),
-            $"neighbors".as("tNeighbors")), $"tId" === $"id", "left")
-        .na.fill(Map("tInDegrees" -> 0))
-        .drop("id")
-        .withColumn("inDegreesDiff", $"tInDegrees" - $"sInDegrees")
-        .withColumn("commonNeighbors", when($"sNeighbors".isNotNull && $"tNeighbors".isNotNull, commonNeighbors($"sNeighbors", $"tNeighbors")).otherwise(0))
-        .withColumn("jaccardCoefficient", when($"sNeighbors".isNotNull && $"tNeighbors".isNotNull, jaccardCoefficient($"sNeighbors", $"tNeighbors")).otherwise(0))
-        .filter($"sYear" >= $"tYear")
 
       assembler.transform(tempDF)
 
@@ -258,10 +205,13 @@ object LinkPrediction {
       )
     )
 
-    val transformedTrainingSetDF = transformSetTrain(trainingSetDF, nodeInfoDF, graphDF)
+
+    val transformedTrainingSetDFPrepro = transformSet(trainingSetDF, nodeInfoDF, graphDF).createOrReplaceTempView("transformedTrainingSetDFPrepro")
+
+    val transformedTrainingSetDF = ss.sql(" SELECT * FROM transformedTrainingSetDFPrepro a WHERE a.sYear < a.tYear")
       .cache() //for performance
 
-    val transformedTestingSetDF = transformSetTest(testingSetDF, nodeInfoDF, graphDF)
+    val transformedTestingSetDF = transformSet(testingSetDF, nodeInfoDF, graphDF)
       .cache()
 
     //transformedTestingSetDF.show(10)
