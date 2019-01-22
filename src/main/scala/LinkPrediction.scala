@@ -18,6 +18,8 @@ import scala.collection.mutable
 
 object LinkPrediction {
   def main(args: Array[String]): Unit = {
+    val t0 = System.nanoTime
+
     System.setProperty("hadoop.home.dir", "C:\\Program Files\\JetBrains\\IntelliJ IDEA 2018.3\\")
     val master = "local[*]"
     val appName = "Link Prediction"
@@ -92,15 +94,22 @@ object LinkPrediction {
 
     def transformNodeInfo(input: DataFrame): DataFrame = {
       // Create tf-idf features
-      val tokenizer = new Tokenizer().setInputCol("abstract").setOutputCol("abstractWords")
-      val remover = new StopWordsRemover().setInputCol(tokenizer.getOutputCol).setOutputCol("abstractFilteredWords")
-      val hashingTF = new HashingTF().setInputCol(remover.getOutputCol).setOutputCol("abstractRawFeatures").setNumFeatures(20000)
-      val idf = new IDF().setInputCol(hashingTF.getOutputCol).setOutputCol("abstractFeatures")
+      val abstractTokenizer = new RegexTokenizer().setMinTokenLength(3).setInputCol("abstract").setOutputCol("abstractWords")
+      val abstractRemover = new StopWordsRemover().setInputCol(abstractTokenizer.getOutputCol).setOutputCol("abstractFilteredWords")
+      val abstractHashingTF = new HashingTF().setInputCol(abstractRemover.getOutputCol).setOutputCol("abstractRawFeatures").setNumFeatures(20000)
+      val abstractIdf = new IDF().setInputCol(abstractHashingTF.getOutputCol).setOutputCol("abstractFeatures")
+      val titleTokenizer = new RegexTokenizer().setMinTokenLength(3).setInputCol("title").setOutputCol("titleWords")
+      val titleRemover = new StopWordsRemover().setInputCol(titleTokenizer.getOutputCol).setOutputCol("titleFilteredWords")
+      val titleHashingTF = new HashingTF().setInputCol(titleRemover.getOutputCol).setOutputCol("titleRawFeatures").setNumFeatures(20000)
+      val titleIdf = new IDF().setInputCol(titleHashingTF.getOutputCol).setOutputCol("titleFeatures")
       val numOfClusters = 6
-      val kMeans = new KMeans().setK(numOfClusters).setFeaturesCol(idf.getOutputCol).setSeed(SEED).setPredictionCol("cluster")
-      val pipeline = new Pipeline().setStages(Array(tokenizer, remover, hashingTF, idf, kMeans))
+      val kMeans = new KMeans().setK(numOfClusters).setFeaturesCol(abstractIdf.getOutputCol).setSeed(SEED).setPredictionCol("cluster")
+      val pipeline = new Pipeline().setStages(Array(
+//        abstractTokenizer, titleTokenizer, abstractRemover, titleRemover, abstractHashingTF, titleHashingTF, abstractIdf, titleIdf, kMeans
+          abstractTokenizer, abstractRemover, abstractHashingTF, abstractIdf, kMeans
+      ))
 
-      val inputCleanedDF = input.na.fill(Map("abstract" -> ""))
+      val inputCleanedDF = input.na.fill(Map("abstract" -> "", "title" -> ""))
       val model = pipeline.fit(inputCleanedDF)
 
       model.transform(inputCleanedDF)
@@ -108,8 +117,8 @@ object LinkPrediction {
 
     def transformSet(input: DataFrame, nodeInfo: DataFrame, graph: DataFrame): DataFrame = {
       val assembler = new VectorAssembler()
-        //        .setInputCols(Array("yearDiff", "isSameJournal","cosSimTFIDF"))
-        .setInputCols(Array("yearDiff", "nCommonAuthors", "isSelfCitation", "isSameJournal", "cosSimTFIDF", "tInDegrees", "inDegreesDiff", "commonNeighbors", "jaccardCoefficient", "InSameCluster"))
+//        .setInputCols(Array("yearDiff", "nCommonAuthors", "isSelfCitation", "isSameJournal", "cosSimAbstract", "cosSimTitle", "tInDegrees", "inDegreesDiff", "commonNeighbors", "jaccardCoefficient", "InSameCluster"))
+        .setInputCols(Array("yearDiff", "nCommonAuthors", "isSelfCitation", "isSameJournal", "cosSimAbstract", "tInDegrees", "inDegreesDiff", "commonNeighbors", "jaccardCoefficient", "InSameCluster"))
         .setOutputCol("features")
 
       val tempDF = input
@@ -119,7 +128,9 @@ object LinkPrediction {
             $"year".as("sYear"),
             $"journal".as("sJournal"),
             $"cluster".as("sCluster"),
-            $"abstractFeatures".as("sAbstractFeatures")), $"sId" === $"id")
+            $"abstractFeatures".as("sAbstractFeatures")//,
+//            $"titleFeatures".as("sTitleFeatures")
+          ), $"sId" === $"id")
         .drop("id")
         .join(nodeInfo
           .select($"id",
@@ -127,15 +138,19 @@ object LinkPrediction {
             $"year".as("tYear"),
             $"journal".as("tJournal"),
             $"cluster".as("tCluster"),
-            $"abstractFeatures".as("tAbstractFeatures")), $"tId" === $"id")
+            $"abstractFeatures".as("tAbstractFeatures")//,
+//            $"titleFeatures".as("tTitleFeatures")
+          ), $"tId" === $"id")
         .drop("id")
         .withColumn("yearDiff", $"tYear" - $"sYear")
         .withColumn("nCommonAuthors", when($"sAuthors".isNotNull && $"tAuthors".isNotNull, myUDF('sAuthors, 'tAuthors)).otherwise(0))
         .withColumn("isSelfCitation", $"nCommonAuthors" >= 1)
         .withColumn("isSameJournal", when($"sJournal" === $"tJournal", true).otherwise(false))
         .withColumn("InSameCluster", when($"sCluster" === $"tCluster", true).otherwise(false))
-        .withColumn("cosSimTFIDF", cosineSimilarityUDF($"sAbstractFeatures", $"tAbstractFeatures"))
+        .withColumn("cosSimAbstract", cosineSimilarityUDF($"sAbstractFeatures", $"tAbstractFeatures"))
         .drop("sAbstractFeatures").drop("tAbstractFeatures")
+//        .withColumn("cosSimTitle", cosineSimilarityUDF($"sTitleFeatures", $"tTitleFeatures"))
+//        .drop("sTitleFeatures").drop("tTitleFeatures")
         .join(graph
           .select($"id",
             $"inDegrees".as("sInDegrees"),
@@ -151,7 +166,6 @@ object LinkPrediction {
         .withColumn("inDegreesDiff", $"tInDegrees" - $"sInDegrees")
         .withColumn("commonNeighbors", when($"sNeighbors".isNotNull && $"tNeighbors".isNotNull, commonNeighbors($"sNeighbors", $"tNeighbors")).otherwise(0))
         .withColumn("jaccardCoefficient", when($"sNeighbors".isNotNull && $"tNeighbors".isNotNull, jaccardCoefficient($"sNeighbors", $"tNeighbors")).otherwise(0))
-        .filter($"sYear" > $"tYear")
 
       assembler.transform(tempDF)
     }
@@ -208,7 +222,7 @@ object LinkPrediction {
     val transformedTestingSetDF = transformSet(testingSetDF, nodeInfoDF, graphDF)
       .cache()
 
-    //transformedTestingSetDF.show(10)
+    transformedTestingSetDF.show(false)
 
     val evaluator = new MulticlassClassificationEvaluator()
       .setLabelCol("label")
@@ -230,7 +244,7 @@ object LinkPrediction {
 
     val RFModel = new RandomForestClassifier()
       .setSeed(SEED)
-      .setNumTrees(10)
+      .setNumTrees(100)
       .fit(transformedTrainingSetDF)
 
     val predictionsRF = RFModel.transform(transformedTestingSetDF)
@@ -254,6 +268,8 @@ object LinkPrediction {
 
     val accuracyDT = evaluator.evaluate(predictionsDT)
     println("F1-score of Decision Tree : " + accuracyDT)
+
+    println("Elapsed time: " + (System.nanoTime - t0) / 1e9d)
 
     System.in.read()
     ss.stop()
