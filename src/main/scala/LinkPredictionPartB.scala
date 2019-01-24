@@ -40,17 +40,24 @@ object LinkPredictionPartB {
       (vec: linalg.Vector) => vec.numNonzeros == 0
     )
 
-    def filterAndEvaluate(input: DataFrame, arr: Array[Double]): Unit = {
+    def filterAndEvaluate(input: DataFrame, nTrue: Long, arr: Array[Double]): Unit = {
       arr.foreach(jaccardDistanceThreshold => {
         println("*************************************************")
         println("Jaccard Distance Threshold: " + jaccardDistanceThreshold)
 
-        val filteredDF = input.filter($"jaccardDistance" < jaccardDistanceThreshold)
+        val filteredDF = input.filter($"jaccardDistance" < jaccardDistanceThreshold).cache()
+        val nPairs = filteredDF.count()
+        val nTP = filteredDF.filter($"correct" === 1.0).count().toDouble
+        val nFP = filteredDF.filter($"correct" === 0.0).count()
+        val nFN = nTrue - nTP
 
-        println("Filtered count: " + filteredDF.count())
-        println("Correctly labeled: " + filteredDF.filter($"correct" === 1.0).count())
-        println("Incorrectly labeled: " + filteredDF.filter($"correct" === 0.0).count())
+        println("Predicted pairs: " + nPairs)
+        println("Correctly labeled: " + nTP)
+        println("Incorrectly labeled: " + nFP)
+        println("F1-score: " + 2 * nTP / (2 * nTP + nFP + nFN))
         println("\n")
+
+        filteredDF.unpersist()
       })
     }
 
@@ -110,6 +117,8 @@ object LinkPredictionPartB {
       .toDF("gtsId", "gttId")
       .withColumn("label", lit(1.0))
 
+    val nTrue = groundTruthNetworkDF.count()
+
     val nodeInfoDF = transformNodeInfo(
       ss.read
         .option("header", "false")
@@ -141,17 +150,17 @@ object LinkPredictionPartB {
     val transformedDF = approxSimJoinDF
       .withColumn("sId", when($"yearA" > $"yearB", $"idA").otherwise($"idB"))
       .withColumn("tId", when($"yearA" > $"yearB", $"idB").otherwise($"idA"))
-//      .drop("idA", "idB", "yearA", "yearB")
-      .join(groundTruthNetworkDF, $"sId" === $"gtsId" && $"tId" === $"gttId" , "left")
+      //      .drop("idA", "idB", "yearA", "yearB")
+      .join(groundTruthNetworkDF, $"sId" === $"gtsId" && $"tId" === $"gttId", "left")
       .drop("gtsId").drop("gttId")
       .withColumn("correct", when($"label" === 1.0, $"label").otherwise(0.0))
       .drop("titleFeaturesA", "titleFeaturesB")
       .cache()
 
     transformedDF.show(false)
-    println("Total count: ", transformedDF.count())
+    println("Total count: " + transformedDF.count())
 
-    filterAndEvaluate(transformedDF, 0.05.to(JACCARD_DISTANCE_THRESHOLD + 0.0001).by(0.05).toArray)
+    filterAndEvaluate(transformedDF, nTrue, 0.05.to(JACCARD_DISTANCE_THRESHOLD + 0.0001).by(0.05).toArray)
 
     println("Elapsed time: " + (System.nanoTime - t0) / 1e9d)
 
