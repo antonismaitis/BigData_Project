@@ -10,10 +10,8 @@ import org.apache.spark.sql.{DataFrame, Dataset, Encoders, SparkSession}
 import org.apache.spark.SparkConf
 import org.apache.spark.ml.linalg.Vectors
 import org.apache.spark.ml.{Pipeline, PipelineModel}
-
 import scala.collection.mutable
 
-//import org.apache.spark.ml.feature.MinHashLSH
 
 
 object LinkPrediction {
@@ -25,9 +23,24 @@ object LinkPrediction {
     val conf: SparkConf = new SparkConf()
       .setMaster(master)
       .setAppName(appName)
+      .set("spark.ui.enabled", "true")
       .set("spark.driver.allowMultipleContexts", "false")
       .set("spark.scheduler.mode", "FAIR")
-      .set("spark.ui.enabled", "true")
+      .set("spark.scheduler.allocation.file","src/resources/fairscheduler.xml")
+      .set("spark.scheduler.pool","default")
+      .set("spark.memory.fraction","1")
+      .set("spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version", "2")
+      .set("spark.default.parallelism","100")
+      .set("spark.sql.shuffle.partitions","42") // Number of partitions = Total input dataset size / partition size => 1500 / 64 = 23.43 = ~23 partitions.
+      .set("spark.task.cpus","1")
+      .set("spark.dynamicAllocation.enabled","true")
+      .set("spark.dynamicAllocation.minExecutors","1")
+      .set("spark.dynamicAllocation.executorAllocationRatio","1")
+      .set("spark.streaming.backPressure.enabled","true")
+      .set("spark.streaming.blockInterval","250ms")
+
+
+
 
     val ss: SparkSession = SparkSession.builder().config(conf).getOrCreate()
 
@@ -69,6 +82,8 @@ object LinkPrediction {
         }
       }
     )
+
+
 
     def commonNeighbors = udf(
       (a: mutable.WrappedArray[Long], b: mutable.WrappedArray[Long]) =>
@@ -151,8 +166,6 @@ object LinkPrediction {
         .withColumn("inDegreesDiff", $"tInDegrees" - $"sInDegrees")
         .withColumn("commonNeighbors", when($"sNeighbors".isNotNull && $"tNeighbors".isNotNull, commonNeighbors($"sNeighbors", $"tNeighbors")).otherwise(0))
         .withColumn("jaccardCoefficient", when($"sNeighbors".isNotNull && $"tNeighbors".isNotNull, jaccardCoefficient($"sNeighbors", $"tNeighbors")).otherwise(0))
-        .filter($"sYear" > $"tYear")
-
       assembler.transform(tempDF)
     }
 
@@ -203,6 +216,8 @@ object LinkPrediction {
     )
 
     val transformedTrainingSetDF = transformSet(trainingSetDF, nodeInfoDF, graphDF)
+
+
       .cache() //for performance
 
     val transformedTestingSetDF = transformSet(testingSetDF, nodeInfoDF, graphDF)
@@ -259,3 +274,5 @@ object LinkPrediction {
     ss.stop()
   }
 }
+
+
