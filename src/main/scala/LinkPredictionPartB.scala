@@ -33,7 +33,7 @@ object LinkPredictionPartB {
     val nodeInfoFile = "./node_information.csv"
     val groundTruthNetworkFile = "./Cit-HepTh.txt"
     val SEED = 1L
-    val NUM_HASH_TABLES = 1
+    val NUM_HASH_TABLES = 10
     val JACCARD_DISTANCE_THRESHOLD = 0.85
 
     def vectorEmpty = udf(
@@ -45,7 +45,10 @@ object LinkPredictionPartB {
         println("*************************************************")
         println("Jaccard Distance Threshold: " + jaccardDistanceThreshold)
 
-        val filteredDF = input.filter($"jaccardDistance" < jaccardDistanceThreshold).cache()
+        val filteredDF = input
+          .filter($"jaccardDistance" < jaccardDistanceThreshold)
+          .filter($"yearDiff" < 4)
+          .cache()
         val nPairs = filteredDF.count()
         val nTP = filteredDF.filter($"correct" === 1.0).count().toDouble
         val nFP = filteredDF.filter($"correct" === 0.0).count()
@@ -127,7 +130,6 @@ object LinkPredictionPartB {
         .csv(nodeInfoFile)
         .toDF("id", "year", "title", "authors", "journal", "abstract")).cache()
 
-
     val mh = new MinHashLSH()
       .setSeed(SEED)
       .setNumHashTables(NUM_HASH_TABLES)
@@ -150,7 +152,8 @@ object LinkPredictionPartB {
     val transformedDF = approxSimJoinDF
       .withColumn("sId", when($"yearA" > $"yearB", $"idA").otherwise($"idB"))
       .withColumn("tId", when($"yearA" > $"yearB", $"idB").otherwise($"idA"))
-      //      .drop("idA", "idB", "yearA", "yearB")
+      .withColumn("yearDiff", when($"yearA" > $"yearB", $"yearA" - $"yearB").otherwise($"yearB" - $"yearA"))
+//      .drop("idA", "idB", "yearA", "yearB")
       .join(groundTruthNetworkDF, $"sId" === $"gtsId" && $"tId" === $"gttId", "left")
       .drop("gtsId").drop("gttId")
       .withColumn("correct", when($"label" === 1.0, $"label").otherwise(0.0))
