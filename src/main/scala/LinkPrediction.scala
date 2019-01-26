@@ -1,18 +1,23 @@
+import org.apache.spark.SparkConf
+import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.graphx._
 import org.apache.spark.ml.classification.{DecisionTreeClassifier, LogisticRegression, RandomForestClassifier}
-import org.apache.spark.ml.clustering.{KMeans}
-import org.apache.spark.ml.evaluation.{ClusteringEvaluator, MulticlassClassificationEvaluator}
+import org.apache.spark.ml.clustering.KMeans
+import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
 import org.apache.spark.ml.feature.{HashingTF, IDF, Tokenizer, VectorAssembler}
 import org.apache.spark.ml.linalg
 import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.sql.functions._
-import org.apache.spark.sql.{DataFrame, Dataset, Encoders, SparkSession}
-import org.apache.spark.SparkConf
+import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.apache.spark._
 import scala.collection.mutable
-import org.apache.spark.annotation.DeveloperApi
-import org.apache.spark.deploy.SparkHadoopUtil
-//import org.apache.spark.ml.feature.MinHashLSH
+import org.apache.spark.ml.linalg.Vectors
 
+//import org.apache.spark.ml.feature.MinHashLSH
+import org.apache.spark.mllib.classification.{LogisticRegressionModel, LogisticRegressionWithLBFGS}
+import org.apache.spark.mllib.evaluation.MulticlassMetrics
+import org.apache.spark.mllib.regression.LabeledPoint
+import org.apache.spark.mllib.util.MLUtils
 
 object LinkPrediction {
   def main(args: Array[String]): Unit = {
@@ -31,15 +36,18 @@ object LinkPrediction {
       .set("spark.memory.fraction", "1")
       .set("spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version", "2")
       .set("spark.default.parallelism", "100")
-      .set("spark.sql.shuffle.partitions", "42") //Number of partitions = Total input dataset size / partition size => 1500 / 64 = 23.43 = ~23 partitions.
+//      .set("spark.speculation", "false")
+//      .set("spark.speculation.quantile", "0.75")
+//      .set("spark.speculation.multiplier", "1.5")
+      .set("spark.sql.shuffle.partitions", "40") //Number of partitions = Total input dataset size / partition size => 1500 / 64 = 23.43 = ~23 partitions.
 //      .set("spark.task.cpus", "1")
 //      .set("spark.dynamicAllocation.enabled", "true")
 //      .set("spark.dynamicAllocation.minExecutors", "1")
 //      .set("spark.dynamicAllocation.executorAllocationRatio", "1")
 //      .set("spark.streaming.backpressure.enabled", "true")
-//      .set("spark.streaming.blockInterval", "250ms")
+ //     .set("spark.streaming.blockInterval", "1000ms")
     val ss: SparkSession = SparkSession.builder().config(conf).getOrCreate()
-    val hadoopConfiguration = SparkHadoopUtil.get.newConfiguration(conf)
+
     import ss.implicits._ // For implicit conversions like converting RDDs to DataFrames
     // Suppress info messages
     ss.sparkContext.setLogLevel("ERROR")
@@ -53,21 +61,26 @@ object LinkPrediction {
       (n: Int) => n.toDouble
     )
 
+    def cosineSimilarityUDF = udf(
+      (a: linalg.Vector, b: linalg.Vector) => {
+        val emptyVec = Vectors.zeros(a.size)
+        if (a.equals(emptyVec) || b.equals(emptyVec)) {
+          0.0
+        } else {
+          val aArr = a.toArray
+          val bArr = b.toArray
+          val dotProduct = aArr.zip(bArr).map(t => t._1 * t._2).sum
+          dotProduct / Math.sqrt(Vectors.sqdist(a, emptyVec) * Vectors.sqdist(b, emptyVec))
+        }
+      }
+    )
+
     def myUDF: UserDefinedFunction = udf(
       (s1: String, s2: String) => {
         val splitted1 = s1.split(",")
         val splitted2 = s2.split(",")
         splitted1.intersect(splitted2).length
       })
-
-
-    def dotProductUDF = udf(
-      (a: linalg.Vector, b: linalg.Vector) => {
-        val aArr = a.toArray
-        val bArr = b.toArray
-        aArr.zip(bArr).map(t => t._1 * t._2).sum
-      }
-    )
 
     def commonNeighbors = udf(
       (a: mutable.WrappedArray[Long], b: mutable.WrappedArray[Long]) =>
@@ -124,6 +137,8 @@ object LinkPrediction {
             $"clusterCenter".as("sCluster"),
             $"abstractFeatures".as("sAbstractFeatures")), $"sId" === $"id")
         .drop("id")
+
+      val tempDF2 = tempDF
         .join(nodeInfo
           .select($"id",
             $"authors".as("tAuthors"),
@@ -133,29 +148,33 @@ object LinkPrediction {
             $"abstractFeatures".as("tAbstractFeatures")), $"tId" === $"id")
         .drop("id")
         .withColumn("yearDiff", $"tYear" - $"sYear")
-        .withColumn("nCommonAuthors", when($"sAuthors".isNotNull && $"tAuthors".isNotNull, myUDF('sAuthors, 'tAuthors)).otherwise(0))
+        .withColumn("nCommonAuthors", when($"sAuthors".isNotNull && $"tAuthors".isNotNull, myUDF('sAuthors,'tAuthors)).otherwise(0))
         .withColumn("isSelfCitation", $"nCommonAuthors" >= 1)
         .withColumn("isSameJournal", when($"sJournal" === $"tJournal", true).otherwise(false))
         .withColumn("InSameCluster", when($"sCluster" === $"tCluster", true).otherwise(false))
-        .withColumn("cosSimTFIDF", dotProductUDF($"sAbstractFeatures", $"tAbstractFeatures"))
+        .withColumn("cosSimTFIDF", bround(cosineSimilarityUDF($"sAbstractFeatures", $"tAbstractFeatures"),3))
         .drop("sAbstractFeatures").drop("tAbstractFeatures")
+
+      val tempDF3 = tempDF2
         .join(graph
           .select($"id",
             $"inDegrees".as("sInDegrees"),
             $"neighbors".as("sNeighbors")), $"sId" === $"id", "left")
-        .na.fill(Map("sInDegrees" -> 0))
+        .na.fill(Map("sInDegrees" -> 1))
         .drop("id")
+
+      val tempDF4 = tempDF3
         .join(graph
           .select($"id",
             $"inDegrees".as("tInDegrees"),
             $"neighbors".as("tNeighbors")), $"tId" === $"id", "left")
-        .na.fill(Map("tInDegrees" -> 0))
+        .na.fill(Map("tInDegrees" -> 1))
         .drop("id")
         .withColumn("inDegreesDiff", $"tInDegrees" - $"sInDegrees")
-        .withColumn("commonNeighbors", when($"sNeighbors".isNotNull && $"tNeighbors".isNotNull, commonNeighbors($"sNeighbors", $"tNeighbors")).otherwise(0))
-        .withColumn("jaccardCoefficient", when($"sNeighbors".isNotNull && $"tNeighbors".isNotNull, jaccardCoefficient($"sNeighbors", $"tNeighbors")).otherwise(0))
+        .withColumn("commonNeighbors", when($"sNeighbors".isNotNull && $"tNeighbors".isNotNull, commonNeighbors($"sNeighbors", $"tNeighbors")).otherwise(0.5))
+        .withColumn("jaccardCoefficient", when($"sNeighbors".isNotNull && $"tNeighbors".isNotNull, bround(jaccardCoefficient($"sNeighbors", $"tNeighbors"),3)).otherwise(0.01))
 
-      assembler.transform(tempDF)
+      assembler.transform(tempDF4).cache()
 
     }
 
@@ -208,7 +227,8 @@ object LinkPrediction {
 
     val transformedTrainingSetDFPrepro = transformSet(trainingSetDF, nodeInfoDF, graphDF).createOrReplaceTempView("transformedTrainingSetDFPrepro")
 
-    val transformedTrainingSetDF = ss.sql(" SELECT * FROM transformedTrainingSetDFPrepro a WHERE a.sYear < a.tYear")
+    val transformedTrainingSetDF = ss.sql("SELECT DISTINCT(a.*) FROM transformedTrainingSetDFPrepro AS a " +
+      "WHERE a.sYear >= a.tYear " )
       .cache() //for performance
 
     val transformedTestingSetDF = transformSet(testingSetDF, nodeInfoDF, graphDF)
@@ -234,7 +254,7 @@ object LinkPrediction {
     val accuracyLR = evaluator.evaluate(predictionsLR)
     println("F1-score of Logistic Regression: " + accuracyLR)
 
-    val RFModel = new RandomForestClassifier().setNumTrees(10)
+    val RFModel = new RandomForestClassifier().setNumTrees(15)
       .fit(transformedTrainingSetDF)
 
     val predictionsRF = RFModel.transform(transformedTestingSetDF)

@@ -2,7 +2,7 @@
 <allocations>
   <pool name="default">
     <schedulingMode>FAIR</schedulingMode>
-    <weight>2</weight>
-    <minShare>4</minShare>
+    <weight>1000</weight>
+    <minShare>150</minShare>
   </pool>
 </allocations>
