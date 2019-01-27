@@ -10,12 +10,16 @@ import org.apache.spark.sql.{DataFrame, Dataset, Encoders, SparkSession}
 import org.apache.spark.SparkConf
 import org.apache.spark.ml.linalg.Vectors
 import org.apache.spark.ml.{Pipeline, PipelineModel}
+
 import scala.collection.mutable
 
+//import org.apache.spark.ml.feature.MinHashLSH
 
 
 object LinkPrediction {
   def main(args: Array[String]): Unit = {
+    val t0 = System.nanoTime
+
     System.setProperty("hadoop.home.dir", "C:\\Program Files\\JetBrains\\IntelliJ IDEA 2018.3\\")
     val master = "local[*]"
     val appName = "Link Prediction"
@@ -31,16 +35,13 @@ object LinkPrediction {
       .set("spark.memory.fraction","1")
       .set("spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version", "2")
       .set("spark.default.parallelism","100")
-      .set("spark.sql.shuffle.partitions","42") // Number of partitions = Total input dataset size / partition size => 1500 / 64 = 23.43 = ~23 partitions.
+      .set("spark.sql.shuffle.partitions","42")
       .set("spark.task.cpus","1")
       .set("spark.dynamicAllocation.enabled","true")
       .set("spark.dynamicAllocation.minExecutors","1")
       .set("spark.dynamicAllocation.executorAllocationRatio","1")
       .set("spark.streaming.backPressure.enabled","true")
       .set("spark.streaming.blockInterval","250ms")
-
-
-
 
     val ss: SparkSession = SparkSession.builder().config(conf).getOrCreate()
 
@@ -83,8 +84,6 @@ object LinkPrediction {
       }
     )
 
-
-
     def commonNeighbors = udf(
       (a: mutable.WrappedArray[Long], b: mutable.WrappedArray[Long]) =>
         a.intersect(b).length
@@ -107,25 +106,32 @@ object LinkPrediction {
 
     def transformNodeInfo(input: DataFrame): DataFrame = {
       // Create tf-idf features
-      val tokenizer = new Tokenizer().setInputCol("abstract").setOutputCol("abstractWords")
-      val remover = new StopWordsRemover().setInputCol(tokenizer.getOutputCol).setOutputCol("abstractFilteredWords")
-      val hashingTF = new HashingTF().setInputCol(remover.getOutputCol).setOutputCol("abstractRawFeatures").setNumFeatures(20000)
-      val idf = new IDF().setInputCol(hashingTF.getOutputCol).setOutputCol("abstractFeatures")
+      val abstractTokenizer = new RegexTokenizer().setMinTokenLength(3).setInputCol("abstract").setOutputCol("abstractWords")
+      val abstractRemover = new StopWordsRemover().setInputCol(abstractTokenizer.getOutputCol).setOutputCol("abstractFilteredWords")
+      val abstractHashingTF = new HashingTF().setInputCol(abstractRemover.getOutputCol).setOutputCol("abstractRawFeatures").setNumFeatures(20000)
+      val abstractIdf = new IDF().setInputCol(abstractHashingTF.getOutputCol).setOutputCol("abstractFeatures")
+      val titleTokenizer = new RegexTokenizer().setMinTokenLength(3).setInputCol("title").setOutputCol("titleWords")
+      val titleRemover = new StopWordsRemover().setInputCol(titleTokenizer.getOutputCol).setOutputCol("titleFilteredWords")
+      val titleHashingTF = new HashingTF().setInputCol(titleRemover.getOutputCol).setOutputCol("titleRawFeatures").setNumFeatures(20000)
+      val titleIdf = new IDF().setInputCol(titleHashingTF.getOutputCol).setOutputCol("titleFeatures")
       val numOfClusters = 6
-      val kMeans = new KMeans().setK(numOfClusters).setFeaturesCol(idf.getOutputCol).setSeed(SEED).setPredictionCol("cluster")
-      val pipeline = new Pipeline().setStages(Array(tokenizer, remover, hashingTF, idf, kMeans))
+      val kMeans = new KMeans().setK(numOfClusters).setFeaturesCol(abstractIdf.getOutputCol).setSeed(SEED).setPredictionCol("cluster")
+      val pipeline = new Pipeline().setStages(Array(
+//        abstractTokenizer, titleTokenizer, abstractRemover, titleRemover, abstractHashingTF, titleHashingTF, abstractIdf, titleIdf, kMeans
+          abstractTokenizer, abstractRemover, abstractHashingTF, abstractIdf, kMeans
+      ))
 
-      val inputCleanedDF = input.na.fill(Map("abstract" -> ""))
+      val inputCleanedDF = input.na.fill(Map("abstract" -> "", "title" -> ""))
       val model = pipeline.fit(inputCleanedDF)
 
       model.transform(inputCleanedDF)
     }
 
     def transformSet(input: DataFrame, nodeInfo: DataFrame, graph: DataFrame): DataFrame = {
-      val assembler = new VectorAssembler()
-        //        .setInputCols(Array("yearDiff", "isSameJournal","cosSimTFIDF"))
-        .setInputCols(Array("yearDiff", "nCommonAuthors", "isSelfCitation", "isSameJournal", "cosSimTFIDF", "tInDegrees", "inDegreesDiff", "commonNeighbors", "jaccardCoefficient", "InSameCluster"))
-        .setOutputCol("features")
+//      val assembler = new VectorAssembler()
+////        .setInputCols(Array("yearDiff", "nCommonAuthors", "isSelfCitation", "isSameJournal", "cosSimAbstract", "cosSimTitle", "tInDegrees", "inDegreesDiff", "commonNeighbors", "jaccardCoefficient", "InSameCluster"))
+//        .setInputCols(Array("yearDiff", "nCommonAuthors", "isSelfCitation", "isSameJournal", "cosSimAbstract", "tInDegrees", "inDegreesDiff", "commonNeighbors", "jaccardCoefficient", "InSameCluster"))
+//        .setOutputCol("features")
 
       val tempDF = input
         .join(nodeInfo
@@ -134,7 +140,9 @@ object LinkPrediction {
             $"year".as("sYear"),
             $"journal".as("sJournal"),
             $"cluster".as("sCluster"),
-            $"abstractFeatures".as("sAbstractFeatures")), $"sId" === $"id")
+            $"abstractFeatures".as("sAbstractFeatures")//,
+//            $"titleFeatures".as("sTitleFeatures")
+          ), $"sId" === $"id")
         .drop("id")
         .join(nodeInfo
           .select($"id",
@@ -142,15 +150,19 @@ object LinkPrediction {
             $"year".as("tYear"),
             $"journal".as("tJournal"),
             $"cluster".as("tCluster"),
-            $"abstractFeatures".as("tAbstractFeatures")), $"tId" === $"id")
+            $"abstractFeatures".as("tAbstractFeatures")//,
+//            $"titleFeatures".as("tTitleFeatures")
+          ), $"tId" === $"id")
         .drop("id")
         .withColumn("yearDiff", $"tYear" - $"sYear")
         .withColumn("nCommonAuthors", when($"sAuthors".isNotNull && $"tAuthors".isNotNull, myUDF('sAuthors, 'tAuthors)).otherwise(0))
         .withColumn("isSelfCitation", $"nCommonAuthors" >= 1)
         .withColumn("isSameJournal", when($"sJournal" === $"tJournal", true).otherwise(false))
         .withColumn("InSameCluster", when($"sCluster" === $"tCluster", true).otherwise(false))
-        .withColumn("cosSimTFIDF", cosineSimilarityUDF($"sAbstractFeatures", $"tAbstractFeatures"))
+        .withColumn("cosSimAbstract", cosineSimilarityUDF($"sAbstractFeatures", $"tAbstractFeatures"))
         .drop("sAbstractFeatures").drop("tAbstractFeatures")
+//        .withColumn("cosSimTitle", cosineSimilarityUDF($"sTitleFeatures", $"tTitleFeatures"))
+//        .drop("sTitleFeatures").drop("tTitleFeatures")
         .join(graph
           .select($"id",
             $"inDegrees".as("sInDegrees"),
@@ -166,7 +178,9 @@ object LinkPrediction {
         .withColumn("inDegreesDiff", $"tInDegrees" - $"sInDegrees")
         .withColumn("commonNeighbors", when($"sNeighbors".isNotNull && $"tNeighbors".isNotNull, commonNeighbors($"sNeighbors", $"tNeighbors")).otherwise(0))
         .withColumn("jaccardCoefficient", when($"sNeighbors".isNotNull && $"tNeighbors".isNotNull, jaccardCoefficient($"sNeighbors", $"tNeighbors")).otherwise(0))
-      assembler.transform(tempDF)
+
+        tempDF
+//      assembler.transform(tempDF)
     }
 
     // Read the contents of files in dataframes
@@ -216,63 +230,131 @@ object LinkPrediction {
     )
 
     val transformedTrainingSetDF = transformSet(trainingSetDF, nodeInfoDF, graphDF)
-
-
       .cache() //for performance
+    transformedTrainingSetDF.show(10)
+
 
     val transformedTestingSetDF = transformSet(testingSetDF, nodeInfoDF, graphDF)
       .cache()
 
-    //transformedTestingSetDF.show(10)
+//    transformedTestingSetDF.show(false)
 
-    val evaluator = new MulticlassClassificationEvaluator()
-      .setLabelCol("label")
-      .setPredictionCol("prediction")
-      .setMetricName("f1")
+    def evaluate(trainingSetDF:DataFrame, testingSetDF:DataFrame, features: Array[String]): Unit = {
+      if (features.length > 0) {
+        val assembler = new VectorAssembler()
+          .setInputCols(features)
+          .setOutputCol("features")
 
-    val LRmodel = new LogisticRegression()
-      .setMaxIter(10000)
-      .setRegParam(0.1)
-      .setElasticNetParam(0.0)
-      .fit(transformedTrainingSetDF)
+        val evaluator = new MulticlassClassificationEvaluator()
+          .setLabelCol("label")
+          .setPredictionCol("prediction")
+          .setMetricName("f1")
 
-    val predictionsLR = LRmodel.transform(transformedTestingSetDF)
-    predictionsLR.printSchema()
-    predictionsLR.show(10)
+        val completeTrainingSetDF = assembler.transform(trainingSetDF).cache()
+        val completeTestingSetDF = assembler.transform(testingSetDF).cache()
 
-    val accuracyLR = evaluator.evaluate(predictionsLR)
-    println("F1-score of Logistic Regression: " + accuracyLR)
 
-    val RFModel = new RandomForestClassifier()
-      .setSeed(SEED)
-      .setNumTrees(10)
-      .fit(transformedTrainingSetDF)
+        val LRmodel = new LogisticRegression()
+          .setMaxIter(10000)
+          .setRegParam(0.1)
+          .setElasticNetParam(0.0)
+          .fit(completeTrainingSetDF)
 
-    val predictionsRF = RFModel.transform(transformedTestingSetDF)
-    predictionsRF.printSchema()
-    predictionsRF.show(10)
 
-    val accuracyRF = evaluator.evaluate(predictionsRF)
-    println("F1-score of Random Forest: " + accuracyRF)
+        val predictionsLR = LRmodel.transform(completeTestingSetDF)
+        //predictionsLR.printSchema()
+       // predictionsLR.show(10)
 
-    println("Importance of features: " + RFModel.featureImportances)
+        println("\n*******************************************************************")
+        println("F1-score of Logistic Regression: " + evaluator.evaluate(predictionsLR))
 
-    val DTModel = new DecisionTreeClassifier()
-      .setSeed(SEED)
-      .setMaxDepth(10)
-      .setImpurity("entropy")
-      .fit(transformedTrainingSetDF)
+        val RFModel = new RandomForestClassifier()
+          .setSeed(SEED)
+          .setNumTrees(10)
+          .fit(completeTrainingSetDF)
 
-    val predictionsDT = DTModel.transform(transformedTestingSetDF)
-    //predictionsDT.printSchema()
-    predictionsDT.show(10)
+        val predictionsRF = RFModel.transform(completeTestingSetDF)
+//        predictionsRF.printSchema()
+//        predictionsRF.show(10)
 
-    val accuracyDT = evaluator.evaluate(predictionsDT)
-    println("F1-score of Decision Tree : " + accuracyDT)
+        println("F1-score of Random Forest: " + evaluator.evaluate(predictionsRF))
+
+        val DTModel = new DecisionTreeClassifier()
+          .setSeed(SEED)
+          .setMaxDepth(10)
+          .setImpurity("entropy")
+          .fit(completeTrainingSetDF)
+
+        val predictionsDT = DTModel.transform(completeTestingSetDF)
+        //predictionsDT.printSchema()
+//        predictionsDT.show(10)
+
+        println("F1-score of Decision Tree : " + evaluator.evaluate(predictionsDT))
+        println("Features: " + features.mkString(", "))
+        val featuresImportancesArr = RFModel.featureImportances.toArray
+        println("Importance of features: " + featuresImportancesArr.mkString(", "))
+        val leastImportantFeature = features(featuresImportancesArr.indexOf(featuresImportancesArr.min))
+        println("Feature dropped: " + leastImportantFeature)
+
+        println("*******************************************************************")
+        completeTrainingSetDF.unpersist()
+        completeTestingSetDF.unpersist()
+
+        evaluate(trainingSetDF, testingSetDF, features.zipWithIndex.filter(_._1 != leastImportantFeature).map(_._1))
+      }
+
+    }
+
+    evaluate(transformedTrainingSetDF, transformedTestingSetDF, Array("yearDiff", "nCommonAuthors", "isSelfCitation", "isSameJournal", "cosSimAbstract", "tInDegrees", "inDegreesDiff", "commonNeighbors", "jaccardCoefficient", "InSameCluster"))
+
+//    val evaluator = new MulticlassClassificationEvaluator()
+//      .setLabelCol("label")
+//      .setPredictionCol("prediction")
+//      .setMetricName("f1")
+//
+//    val LRmodel = new LogisticRegression()
+//      .setMaxIter(10000)
+//      .setRegParam(0.1)
+//      .setElasticNetParam(0.0)
+//      .fit(transformedTrainingSetDF)
+//
+//    val predictionsLR = LRmodel.transform(transformedTestingSetDF)
+//    predictionsLR.printSchema()
+//    predictionsLR.show(10)
+//
+//    val accuracyLR = evaluator.evaluate(predictionsLR)
+//    println("F1-score of Logistic Regression: " + accuracyLR)
+//
+//    val RFModel = new RandomForestClassifier()
+//      .setSeed(SEED)
+//      .setNumTrees(100)
+//      .fit(transformedTrainingSetDF)
+//
+//    val predictionsRF = RFModel.transform(transformedTestingSetDF)
+//    predictionsRF.printSchema()
+//    predictionsRF.show(10)
+//
+//    val accuracyRF = evaluator.evaluate(predictionsRF)
+//    println("F1-score of Random Forest: " + accuracyRF)
+//
+//    println("Importance of features: " + RFModel.featureImportances)
+//
+//    val DTModel = new DecisionTreeClassifier()
+//      .setSeed(SEED)
+//      .setMaxDepth(10)
+//      .setImpurity("entropy")
+//      .fit(transformedTrainingSetDF)
+//
+//    val predictionsDT = DTModel.transform(transformedTestingSetDF)
+//    //predictionsDT.printSchema()
+//    predictionsDT.show(10)
+//
+//    val accuracyDT = evaluator.evaluate(predictionsDT)
+//    println("F1-score of Decision Tree : " + accuracyDT)
+
+    println("Elapsed time: " + (System.nanoTime - t0) / 1e9d)
 
     System.in.read()
     ss.stop()
   }
 }
-
-
