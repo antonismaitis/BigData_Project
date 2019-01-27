@@ -90,30 +90,6 @@ object LinkPredictionPartB {
         .setBinary(true)
         .setNumFeatures(18000)
 
-      // val abstractCountVectorizer = new CountVectorizer()
-       // .setInputCol(abstractRemover.getOutputCol)
-       // .setOutputCol("abstractFeatures")
-       // .setBinary(true)
-
-
-
-//      val journalTokenizer = new RegexTokenizer()
-//        .setInputCol("journal")
-//        .setOutputCol("journalWords")
-//        .setMinTokenLength(3)
-//
-//      val journalRemover = new StopWordsRemover()
-//        .setInputCol(journalTokenizer.getOutputCol)
-//        .setOutputCol("journalFilteredWords")
-//
-//      val journalHashingTF = new HashingTF()
-//        .setInputCol(journalRemover.getOutputCol)
-//        .setOutputCol("journalFeatures")
-//        .setNumFeatures(500)
-//        .setBinary(true)
-
-
-
 
       val titleTokenizer = new RegexTokenizer()
         .setMinTokenLength(3)
@@ -123,11 +99,6 @@ object LinkPredictionPartB {
       val titleRemover = new StopWordsRemover()
         .setInputCol(titleTokenizer.getOutputCol)
         .setOutputCol("titleFilteredWords")
-
-      //val titleCountVectorizer = new CountVectorizer()
-      //  .setInputCol(titleRemover.getOutputCol)
-      //  .setOutputCol("titleFeatures")
-      //  .setBinary(true)
 
       val titleHashingTF = new HashingTF()
         .setInputCol(titleTokenizer.getOutputCol)
@@ -143,7 +114,6 @@ object LinkPredictionPartB {
       val pipeline = new Pipeline()
         .setStages(
           Array(
-            //journalTokenizer,journalRemover,journalHashingTF,
             abstractTokenizer, abstractRemover, abstractHashingTF,
             titleTokenizer, titleRemover, titleHashingTF,assembler1
           )
@@ -160,8 +130,7 @@ object LinkPredictionPartB {
         .filter(!vectorEmpty($"abstractFeatures"))
         .filter($"title" =!= "")
         .filter(!vectorEmpty($"titleFeatures"))
-//        .filter(!vectorEmpty($"journalFeatures"))
-//        .filter($"journal" =!= "")
+
     }
 
     // Read the contents of files in dataframes

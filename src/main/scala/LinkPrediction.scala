@@ -128,10 +128,6 @@ object LinkPrediction {
     }
 
     def transformSet(input: DataFrame, nodeInfo: DataFrame, graph: DataFrame): DataFrame = {
-//      val assembler = new VectorAssembler()
-////        .setInputCols(Array("yearDiff", "nCommonAuthors", "isSelfCitation", "isSameJournal", "cosSimAbstract", "cosSimTitle", "tInDegrees", "inDegreesDiff", "commonNeighbors", "jaccardCoefficient", "InSameCluster"))
-//        .setInputCols(Array("yearDiff", "nCommonAuthors", "isSelfCitation", "isSameJournal", "cosSimAbstract", "tInDegrees", "inDegreesDiff", "commonNeighbors", "jaccardCoefficient", "InSameCluster"))
-//        .setOutputCol("features")
 
       val tempDF = input
         .join(nodeInfo
@@ -237,7 +233,6 @@ object LinkPrediction {
     val transformedTestingSetDF = transformSet(testingSetDF, nodeInfoDF, graphDF)
       .cache()
 
-//    transformedTestingSetDF.show(false)
 
     def evaluate(trainingSetDF:DataFrame, testingSetDF:DataFrame, features: Array[String]): Unit = {
       if (features.length > 0) {
@@ -262,8 +257,6 @@ object LinkPrediction {
 
 
         val predictionsLR = LRmodel.transform(completeTestingSetDF)
-        //predictionsLR.printSchema()
-       // predictionsLR.show(10)
 
         println("\n*******************************************************************")
         println("F1-score of Logistic Regression: " + evaluator.evaluate(predictionsLR))
@@ -274,8 +267,6 @@ object LinkPrediction {
           .fit(completeTrainingSetDF)
 
         val predictionsRF = RFModel.transform(completeTestingSetDF)
-//        predictionsRF.printSchema()
-//        predictionsRF.show(10)
 
         println("F1-score of Random Forest: " + evaluator.evaluate(predictionsRF))
 
@@ -286,8 +277,6 @@ object LinkPrediction {
           .fit(completeTrainingSetDF)
 
         val predictionsDT = DTModel.transform(completeTestingSetDF)
-        //predictionsDT.printSchema()
-//        predictionsDT.show(10)
 
         println("F1-score of Decision Tree : " + evaluator.evaluate(predictionsDT))
         println("Features: " + features.mkString(", "))
@@ -306,51 +295,6 @@ object LinkPrediction {
     }
 
     evaluate(transformedTrainingSetDF, transformedTestingSetDF, Array("yearDiff", "nCommonAuthors", "isSelfCitation", "isSameJournal", "cosSimAbstract", "tInDegrees", "inDegreesDiff", "commonNeighbors", "jaccardCoefficient", "InSameCluster"))
-
-//    val evaluator = new MulticlassClassificationEvaluator()
-//      .setLabelCol("label")
-//      .setPredictionCol("prediction")
-//      .setMetricName("f1")
-//
-//    val LRmodel = new LogisticRegression()
-//      .setMaxIter(10000)
-//      .setRegParam(0.1)
-//      .setElasticNetParam(0.0)
-//      .fit(transformedTrainingSetDF)
-//
-//    val predictionsLR = LRmodel.transform(transformedTestingSetDF)
-//    predictionsLR.printSchema()
-//    predictionsLR.show(10)
-//
-//    val accuracyLR = evaluator.evaluate(predictionsLR)
-//    println("F1-score of Logistic Regression: " + accuracyLR)
-//
-//    val RFModel = new RandomForestClassifier()
-//      .setSeed(SEED)
-//      .setNumTrees(100)
-//      .fit(transformedTrainingSetDF)
-//
-//    val predictionsRF = RFModel.transform(transformedTestingSetDF)
-//    predictionsRF.printSchema()
-//    predictionsRF.show(10)
-//
-//    val accuracyRF = evaluator.evaluate(predictionsRF)
-//    println("F1-score of Random Forest: " + accuracyRF)
-//
-//    println("Importance of features: " + RFModel.featureImportances)
-//
-//    val DTModel = new DecisionTreeClassifier()
-//      .setSeed(SEED)
-//      .setMaxDepth(10)
-//      .setImpurity("entropy")
-//      .fit(transformedTrainingSetDF)
-//
-//    val predictionsDT = DTModel.transform(transformedTestingSetDF)
-//    //predictionsDT.printSchema()
-//    predictionsDT.show(10)
-//
-//    val accuracyDT = evaluator.evaluate(predictionsDT)
-//    println("F1-score of Decision Tree : " + accuracyDT)
 
     println("Elapsed time: " + (System.nanoTime - t0) / 1e9d)
 
